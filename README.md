@@ -1,6 +1,6 @@
-# baton
+# baton 🏃
 
-Drive **Mistral Vibe** from your phone. Native remote mode for
+Pass the baton: drive **Mistral Vibe** from your phone. Native remote mode for
 [mistral-vibe#1535](https://github.com/mistralai/mistral-vibe/issues/1535) —
 built on `vibe-acp` (Agent Client Protocol), voice-native via **Voxtral**.
 
