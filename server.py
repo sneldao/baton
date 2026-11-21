@@ -15,8 +15,6 @@ import os
 import secrets
 import shlex
 import socket
-import sys
-import time
 from pathlib import Path
 
 import httpx
@@ -30,6 +28,7 @@ log = logging.getLogger("baton")
 STATIC = Path(__file__).parent / "static"
 PORT = int(os.environ.get("PORT", "8765"))
 TOKEN = os.environ.get("VIBE_REMOTE_TOKEN") or secrets.token_urlsafe(12)
+
 
 # How to launch vibe-acp. Defaults: binary on PATH, else `uv run` in a sibling
 # clone of mistralai/mistral-vibe.
@@ -202,9 +201,7 @@ class AcpBridge:
         return await asyncio.wait_for(fut, timeout=120)
 
     async def notify(self, method: str, params: dict | None = None) -> None:
-        await self._send(
-            {"jsonrpc": "2.0", "method": method, "params": params or {}}
-        )
+        await self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
     async def _send(self, msg: dict) -> None:
         assert self.proc and self.proc.stdin
@@ -234,9 +231,10 @@ bridge = AcpBridge()
 
 
 def check_token(request: web.Request) -> bool:
-    return request.query.get("token") == TOKEN or request.headers.get(
-        "X-Vibe-Token"
-    ) == TOKEN
+    return (
+        request.query.get("token") == TOKEN
+        or request.headers.get("X-Vibe-Token") == TOKEN
+    )
 
 
 async def index(request: web.Request) -> web.Response:
@@ -283,9 +281,7 @@ async def handle_client_msg(ws: web.WebSocketResponse, msg: dict) -> None:
             await bridge.notify(msg["method"], msg.get("params"))
         elif mtype == "agent_response":  # answer to agent -> client request
             if "error" in msg:
-                ok = await bridge.error_agent_request(
-                    msg["requestId"], msg["error"]
-                )
+                ok = await bridge.error_agent_request(msg["requestId"], msg["error"])
             else:
                 ok = await bridge.answer_agent_request(
                     msg["requestId"], msg.get("result", {})
@@ -295,9 +291,7 @@ async def handle_client_msg(ws: web.WebSocketResponse, msg: dict) -> None:
                     {"type": "error", "message": "request already resolved"}
                 )
     except Exception as exc:
-        await ws.send_json(
-            {"id": msg.get("id"), "error": {"message": str(exc)}}
-        )
+        await ws.send_json({"id": msg.get("id"), "error": {"message": str(exc)}})
 
 
 async def voice(request: web.Request) -> web.Response:
@@ -317,7 +311,9 @@ async def voice(request: web.Request) -> web.Response:
         resp = await client.post(
             "https://api.mistral.ai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": (f"audio.{ctype.split('/')[-1].split(';')[0]}", audio, ctype)},
+            files={
+                "file": (f"audio.{ctype.split('/')[-1].split(';')[0]}", audio, ctype)
+            },
             data={"model": "voxtral-mini-latest"},
         )
     if resp.status_code != 200:

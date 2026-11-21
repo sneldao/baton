@@ -1,0 +1,28 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b # v5.0.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: mixed-line-ending
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794 # v0.15.13
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Secrets: gitleaks is a local binary (brew). Scans staged diff only.
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secrets scan)
+        language: system
+        entry: gitleaks protect --staged --redact
+        pass_filenames: false
