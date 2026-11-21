@@ -22,14 +22,37 @@ phone browser (PWA)  ──WebSocket──▶  baton  ──stdio/JSON-RPC──
 
 ```bash
 uv sync
-MISTRAL_API_KEY=… uv run python server.py
+MISTRAL_API_KEY=… ./run.sh                      # stock vibe-acp
+MISTRAL_API_KEY=… ./run.sh /path/to/vibe/fork   # the team's fork
 ```
 
 Then open the printed URL on your phone (or scan `/qr.png` on the host).
 
-Config env vars: `PORT` (8765), `VIBE_ACP_CMD` (default: `vibe-acp` on PATH,
-else `uv run` in a sibling `mistral-vibe` clone), `VIBE_REMOTE_TOKEN`
-(default: random per launch).
+Config env vars: `PORT` (8765), `VIBE_ACP_CMD` (any command, see `run.sh`),
+`VIBE_REMOTE_TOKEN` (default: random per launch).
+
+## Integration contract (for teammates)
+
+Baton needs **nothing** from the vibe fork beyond a working `vibe-acp`.
+Whatever your branch adds surfaces automatically:
+
+| Your feature | How it shows up in baton |
+| --- | --- |
+| New tools / tool calls | `session/update` → rendered as cards in the stream |
+| New permission triggers | `session/request_permission` → phone approve/reject card |
+| New modes | `session/set_mode` → mode picker, populated from `session/new` |
+| Anything over MCP | configure on the session as usual (`mcpServers`) |
+
+Test your branch against baton: `./run.sh /path/to/your/branch`, then:
+
+- [ ] `session/new` returns a sessionId without errors
+- [ ] a prompt produces streamed output on the phone
+- [ ] your feature's permission prompt (if any) reaches the phone and
+      approve/reject unblocks the agent
+- [ ] `session/list` + resume still works
+
+If it works over ACP, it works in baton. If your branch changes ACP methods
+themselves, tell me — that's the one place we can conflict.
 
 ## Demo story
 
