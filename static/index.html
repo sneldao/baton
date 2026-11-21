@@ -164,6 +164,10 @@
   #ticker .live { font-family:var(--disp); color:var(--acc); letter-spacing:.12em; font-size:18px; animation:blink 1.6s infinite }
   #permInner { touch-action:none }
 
+  /* ?calm — recording mode: pause perpetual loops so capture encoders keep up.
+     One-shot entrances/stamps still play; ambient motion freezes. */
+  body.calm .stripe, body.calm .live, body.calm #perm, body.calm #permClock { animation: none }
+
   /* compact header on phones — controls scroll instead of colliding */
   @media (max-width:680px){
     header { padding:10px 12px; gap:6px; overflow-x:auto; scrollbar-width:none }
@@ -224,7 +228,8 @@
 <script>
 const qs = new URLSearchParams(location.search);
 const token = qs.get('token') || '';
-if (qs.has('stage')) document.body.className = 'stage';
+if (qs.has('stage')) document.body.classList.add('stage');
+if (qs.has('calm')) document.body.classList.add('calm');
 const $ = id => document.getElementById(id);
 let ws, sessionId = null, cwd = null, curAgentEl = null, nextId = 0;
 let lastAgentText = '', narrationOn = false, turnActive = false, autoLow = false;
