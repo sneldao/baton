@@ -397,7 +397,7 @@ function showPerm(m){
   const c=document.createElement('button');
   c.textContent='✕ cancel'; c.className='deny';
   c.onclick=()=>answerPerm(null); box.appendChild(c);
-  $('permRisk').className='risk'; $('permRisk').textContent='';
+  $('permRisk').className='risk medium'; $('permRisk').textContent='mistral · weighing risk…';
   $('perm').style.display='block';
   setAmbient();
   ding();
@@ -418,11 +418,14 @@ async function annotate(tc){
       const e = $('permRisk');
       e.textContent = `mistral · ${j.risk||'medium'} risk — ${j.summary}`;
       e.className = 'risk ' + (j.risk||'medium');
+      if (narrationOn) narrate(`${j.risk||'medium'} risk. ${j.summary}`);
     }
   } catch(e){}
 }
 
-function answerPerm(optionId){
+// how was it answered — the modality is part of the story
+const VIA = {tap:'👆', swipe:'→', voice:'🎙', face:'🙆'};
+function answerPerm(optionId, via='tap'){
   if (!permRequest) return;
   const result = optionId
     ? {outcome:{outcome:'selected', optionId}}
@@ -432,8 +435,11 @@ function answerPerm(optionId){
   $('perm').style.display='none';
   permRequest = null;
   setAmbient();
-  tick(optionId ? `✓ approved in ${s.toFixed(1)}s — agent continues` : `✕ rejected in ${s.toFixed(1)}s`);
-  stamp((optionId ? 'approved' : 'rejected') + ` · ${s.toFixed(1)}s`, !!optionId);
+  const tag = VIA[via] || '👆';
+  tick(optionId ? `✓ approved in ${s.toFixed(1)}s via ${via} — agent continues`
+                : `✕ rejected in ${s.toFixed(1)}s via ${via}`);
+  stamp(`${tag} ${optionId ? 'approved' : 'rejected'} · ${s.toFixed(1)}s`, !!optionId);
+  if (narrationOn) narrate(optionId ? 'Approved. Agent continues.' : 'Rejected.');
 }
 
 async function narrate(text){
@@ -538,9 +544,9 @@ function voiceAnswer(text){
   if (yes && !no){
     // speech may only grant once — persistent grants need a deliberate tap
     const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
-    if (allow) return answerPerm(allow.optionId);
+    if (allow) return answerPerm(allow.optionId, 'voice');
   }
-  if (no) return answerPerm(null);
+  if (no) return answerPerm(null, 'voice');
   toast('unclear — tap a button');
 }
 
@@ -577,8 +583,8 @@ $('narrBtn').onclick = ()=>{
     if (dx > 90){
       const opts = permRequest.params.options||[];
       const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
-      if (allow) answerPerm(allow.optionId);
-    } else if (dx < -90) answerPerm(null);
+      if (allow) answerPerm(allow.optionId, 'swipe');
+    } else if (dx < -90) answerPerm(null, 'swipe');
   });
 })();
 
@@ -657,8 +663,8 @@ function faceAct(yes){
     const opts = permRequest.params.options||[];
     const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
     toast('nod → approve once');
-    if (allow) answerPerm(allow.optionId);
-  } else { toast('shake → reject'); answerPerm(null); }
+    if (allow) answerPerm(allow.optionId, 'face');
+  } else { toast('shake → reject'); answerPerm(null, 'face'); }
 }
 
 $('pairBtn').onclick = ()=>{
