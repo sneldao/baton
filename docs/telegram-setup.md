@@ -6,12 +6,12 @@ few commands drive the current session. It is "bring your own bot" — you creat
 the bot, you authorize exactly one chat (yours), and nothing about your bot is
 shared with anyone else's baton instance.
 
-> **Status: paused.** The integration is gated by
-> [telegram-integration-review.md](telegram-integration-review.md). The offline
-> suite (fake Telegram + fake ACP, 28 tests) passes, but the live phone
-> rehearsal and scoped pairing credentials are still pending — do not run this
-> against a real bot/chat you care about yet. Everything below is how it *will*
-> be turned on, and works today for testing.
+> **Status: local demo.** The offline suite (fake Telegram + fake ACP)
+> passes and a real-phone **Allow once** rehearsal has succeeded for both
+> the ACP flow and the native CLI relay. The release gate in
+> [telegram-integration-review.md](telegram-integration-review.md) still has
+> open items — scoped pairing credentials and live deny/stop/race/reconnect
+> rehearsal — so treat this as a local demo path, not a public rollout.
 
 ## What you need
 
@@ -77,7 +77,9 @@ BATON_TOKEN=<token> ./telegram.sh   # terminal 2
 
 `telegram.sh` loads `.env`, checks both variables are set, and runs
 `tools/telegram_bridge.py`. `BATON_WS` / `BATON_HTTP` override the default
-`localhost:8765` endpoints if baton runs elsewhere.
+`localhost:8765` endpoints if baton runs elsewhere. For the stock Vibe TUI
+demo, point them at the loopback native listener instead — see
+[native-cli-demo.md](native-cli-demo.md).
 
 ## Step 5 — Link the chat
 
@@ -134,8 +136,16 @@ receives tool-call inputs for risk summaries. Treat both channels as shared.
   `@username` or negative (group) ID. Use the positive number from
   `getUpdates`.
 - **Nothing arrives, `/status` says connected** — the agent hasn't hit a
-  permission prompt. Commands already in `~/.vibe` allowlists (`ls`, `cat`,
-  `git status`…) never produce a card; that's the feature, not a bug.
+  permission prompt. In the ACP flow, commands already in `~/.vibe`
+  allowlists (`ls`, `cat`, `git status`…) never produce a card. In the
+  native CLI demo (`--approval-policy=accept-edits`), baton auto-approves
+  read-only shell (`ls`, `git status`, safe `find`/`grep` pipelines);
+  `rm`, writes, network commands, and git mutations still card. That's the
+  feature, not a bug.
+- **`connection refused` / reconnect loop on the native port** — the
+  `native.sh` TUI is not running or exited. Start it first, then confirm
+  `lsof -nP -iTCP:8767 -sTCP:LISTEN` before prompting; see
+  [native-cli-demo.md](native-cli-demo.md).
 - **Bridge logs `tg poll: …`** — usually a revoked/typo'd token or no network.
   Check the token with
   `curl -s "https://api.telegram.org/bot<TOKEN>/getMe"`.

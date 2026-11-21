@@ -1,6 +1,6 @@
 # Telegram integration review
 
-Status: Phase 1 hardening and the core Phase 2 protocol fixes have passed offline checks. The live integration remains paused; pushing source changes does not clear the release gate or authorize restarting the servers, Telegram poller, or public tunnel.
+Status: Phase 1 hardening and the core Phase 2 protocol fixes pass offline checks (28 tests). Live rehearsals have proven **Allow once** end to end for both the ACP flow and the native CLI relay. The release gate is not fully cleared: scoped pairing credentials and live deny/stop/race/reconnect rehearsal remain pending. This document does not by itself authorize public exposure.
 
 Baton moves authority, not execution. Only an explicitly authorized operator can act, an answer must target one request and one offered action, and receipts must reflect the server's result.
 
@@ -31,7 +31,7 @@ Implemented (core, offline-verified):
 
 Still pending:
 
-- End-to-end rehearsal: fake Telegram + fake ACP scenario tests beyond the boundary contract (including a rejected message payload) are now checked in (`tests/test_telegram_e2e_fake.py`, run with `uv run --with pytest pytest tests/`); one live pass on the real phone is still pending.
+- End-to-end rehearsal: fake Telegram + fake ACP scenario tests beyond the boundary contract (including a rejected message payload) are checked in (`tests/test_telegram_e2e_fake.py`, run with `uv run --with pytest pytest tests/`). **Allow once** has been rehearsed live on the real phone for both the ACP flow and the native CLI relay; Deny, `/stop`, racing phone-vs-Telegram taps, and reconnect-restore still need a live pass (offline-covered only).
 - Make Mistral summaries advisory for the demo — not model-authorized auto passes.
 - Replace the shared bearer with scoped, expiring pairing credentials before any public rollout.
 

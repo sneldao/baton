@@ -22,6 +22,8 @@ annotation, Voxtral voice answers.
 - Stream agent turns live (`session/update`)
 - **Remote permission approvals** (`session/request_permission`) — tap, swipe,
   voice, or **nod/shake your face** (MediaPipe, allow-once only)
+- **Native Vibe CLI demo** — `native.sh` + `native_cli.py` route the stock
+  TUI's approvals to Telegram ([docs/native-cli-demo.md](docs/native-cli-demo.md))
 - **Three-tier trust policy** (allow/ask/deny, Claude Code-style) — deny rules
   refuse on your behalf (`.env`, keys, secrets never reach the phone), allow
   rules + Mistral-classified low-risk calls auto-pass, and one-way doors
@@ -69,7 +71,7 @@ Voxtral). On macOS `run.sh` inherits the credential vibe-acp stored in the
 vars. Vibe-side sessions use the auth and model configured in `~/.vibe`
 (the account's catalog default, e.g. `mistral-large-4-0`).
 
-**Telegram client (paused).** `tools/telegram_bridge.py` turns one private
+**Telegram client (local demo).** `tools/telegram_bridge.py` turns one private
 chat into another baton device — bring your own bot:
 [docs/telegram-setup.md](docs/telegram-setup.md) has the full walkthrough
 (@BotFather token, chat-ID lookup, `.env`, launch, linking). Permission
@@ -77,10 +79,11 @@ requests arrive as messages with
 inline Allow once / Deny buttons, plus `/new`, `/sessions`, `/stop`,
 `/policy`, `/status` commands and direct replies. Routine tool activity
 and streaming output stay in the browser. The Telegram picker resumes an
-already-open Baton session without reloading its history. The integration is paused
-pending the release gate in
-[docs/telegram-integration-review.md](docs/telegram-integration-review.md) —
-do not run it against real Telegram yet.
+already-open Baton session without reloading its history. This is a local
+demo path, not a public rollout: it uses a shared bearer token, and the
+release gate in [docs/telegram-integration-review.md](docs/telegram-integration-review.md)
+still has open items (scoped pairing credentials; live deny/stop/race/reconnect
+rehearsal).
 
 ```bash
 # .env (gitignored): TELEGRAM_BOT_TOKEN=… from @BotFather
@@ -182,8 +185,10 @@ Off-LAN, `./tunnel.sh` (cloudflared) gives an
 **Could it work over Telegram / Slack / a watch?**
 The bridge is just a WebSocket protocol — any client can subscribe to
 permission requests and post answers; first answer wins and the other cards
-dismiss. A Telegram client exists but is paused pending a security gate —
-see above. The browser is the richest client, not the only one.
+dismiss. A Telegram client exists for local demos — see
+[docs/telegram-setup.md](docs/telegram-setup.md) and, for the stock TUI,
+[docs/native-cli-demo.md](docs/native-cli-demo.md). It is not cleared for
+public/untrusted use. The browser is the richest client, not the only one.
 
 **Where are the extra features? How do I turn them on?**
 - 🙆 **Face** — a "nod or shake your answer" button on every permission card.
