@@ -27,7 +27,7 @@ log = logging.getLogger("baton")
 
 STATIC = Path(__file__).parent / "static"
 PORT = int(os.environ.get("PORT", "8765"))
-TOKEN = os.environ.get("VIBE_REMOTE_TOKEN") or secrets.token_urlsafe(12)
+TOKEN = os.environ.get("BATON_TOKEN") or secrets.token_urlsafe(12)
 
 
 # How to launch vibe-acp. Defaults: binary on PATH, else `uv run` in a sibling

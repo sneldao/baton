@@ -29,7 +29,7 @@ MISTRAL_API_KEY=… ./run.sh /path/to/vibe/fork   # the team's fork
 Then open the printed URL on your phone (or scan `/qr.png` on the host).
 
 Config env vars: `PORT` (8765), `VIBE_ACP_CMD` (any command, see `run.sh`),
-`VIBE_REMOTE_TOKEN` (default: random per launch).
+`BATON_TOKEN` (default: random per launch).
 
 ## Integration contract (for teammates)
 
@@ -53,6 +53,18 @@ Test your branch against baton: `./run.sh /path/to/your/branch`, then:
 
 If it works over ACP, it works in baton. If your branch changes ACP methods
 themselves, tell me — that's the one place we can conflict.
+
+## Development
+
+```bash
+brew install gitleaks   # secrets scan runs as a local pre-commit hook
+pre-commit install
+pre-commit run --all-files
+```
+
+Hooks: ruff lint/format, yaml/toml/json hygiene, `detect-private-key`,
+gitleaks. Never commit `MISTRAL_API_KEY` or `.env` — they stay in the
+environment or `~/.vibe/.env`.
 
 ## Demo story
 
