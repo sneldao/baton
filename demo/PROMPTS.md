@@ -2,6 +2,9 @@
 
 Send these against **this directory** (`baton/demo/`).
 
+For the layered tube-story demo (baton + the fork's computer-use MCP, agent
+drives the Mac GUI from your phone), see [TUBE-STORY.md](TUBE-STORY.md).
+
 **Set the mode to `ask` first** — new sessions default to `accept-edits`,
 which silently auto-approves file edits and kills the demo's permission
 beats. Bash commands still prompt in any mode; file edits only prompt
