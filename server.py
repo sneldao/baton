@@ -590,6 +590,8 @@ async def policy(request: web.Request) -> web.Response:
 
 
 async def qr_png(request: web.Request) -> web.Response:
+    if not check_token(request):
+        return web.Response(status=401, text="bad token")
     import io
 
     import qrcode
@@ -598,7 +600,11 @@ async def qr_png(request: web.Request) -> web.Response:
     img = qrcode.make(url)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return web.Response(body=buf.getvalue(), content_type="image/png")
+    return web.Response(
+        body=buf.getvalue(),
+        content_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def on_startup(app: web.Application) -> None:
@@ -626,7 +632,7 @@ def main() -> None:
     print(
         f"\n  baton listening"
         f"\n  pair your phone: {base}/?token={TOKEN}"
-        f"\n  QR code: {base}/qr.png  (open on the host screen)\n"
+        f"\n  QR code: use Pair on the authenticated page (trusted LAN only)\n"
     )
     web.run_app(app, host="0.0.0.0", port=PORT, print=None)
 

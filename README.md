@@ -52,7 +52,10 @@ uv sync
 MISTRAL_API_KEY=… ./run.sh        # or explicit key
 ```
 
-Then open the printed URL on your phone (or scan `/qr.png` on the host).
+Then open the printed URL on your phone, or use **Pair** on the authenticated
+web page to show a QR code. The QR encodes the access token — only use it on a
+trusted LAN and never share it. `/qr.png` requires the token and is not
+publicly safe to expose.
 
 **Voice needs HTTPS.** `getUserMedia` is blocked on `http://<lan-ip>` — over
 plain LAN the mic button silently fails. For the voice demo run
@@ -66,19 +69,24 @@ Voxtral). On macOS `run.sh` inherits the credential vibe-acp stored in the
 vars. Vibe-side sessions use the auth and model configured in `~/.vibe`
 (the account's catalog default, e.g. `mistral-large-4-0`).
 
-**Telegram client.** `tools/telegram_bridge.py` turns any chat into another
-baton device: permission requests arrive as messages with inline
-approve/deny buttons, plus `/new`, `/stop`, `/auto`, `/policy` commands and
-agent replies. First answer wins across phone, stage and Telegram.
+**Telegram client (paused).** `tools/telegram_bridge.py` turns one private
+chat into another baton device: permission requests arrive as messages with
+inline Allow once / Deny buttons, plus `/new`, `/sessions`, `/stop`,
+`/policy`, `/status` commands and agent replies. The integration is paused
+pending the release gate in
+[docs/telegram-integration-review.md](docs/telegram-integration-review.md) —
+do not run it against real Telegram yet.
 
 ```bash
 # .env (gitignored): TELEGRAM_BOT_TOKEN=… from @BotFather
+#                    TELEGRAM_CHAT_ID=…  positive numeric id of the one
+#                    authorized private chat (equals the operator's user id)
 BATON_TOKEN=<token server.py printed> ./telegram.sh
-# then /start the bot in Telegram — pending cards replay on reconnect
+# then /start the bot from that account — /start confirms access,
+# it cannot grant it: only TELEGRAM_CHAT_ID authorizes anyone
 ```
 
-Optional: `TELEGRAM_CHAT_ID` pins the bridge to one chat; `BATON_WS` /
-`BATON_HTTP` override the default `localhost:8765` endpoints.
+`BATON_WS` / `BATON_HTTP` override the default `localhost:8765` endpoints.
 
 **Testing / rehearsal drivers.** `tools/drive.py` creates a session and
 prompts it (optionally `--auto-answer N`); `tools/task.py` prompts an
@@ -154,19 +162,23 @@ write, or `git commit`.
 ## FAQ
 
 **How does it get to my phone? Does Vibe need to run there?**
-Nothing installs on the phone — it is just a browser. `run.sh` prints a URL
-(and `/qr.png` on the host); open it and you're paired. Vibe keeps running on
-the laptop the whole time: baton speaks stdio/JSON-RPC to `vibe-acp` locally
-and plain WebSocket+JSON outward, so the session, the sandbox, and the files
-never leave the machine — only the *authority* moves. Off-LAN, `./tunnel.sh`
-(cloudflared) gives an `https://` URL, which voice/face need anyway since
-browsers block `getUserMedia` on plain `http://` LAN origins.
+Nothing installs on the phone — it is just a browser. `run.sh` prints a URL;
+open it (or use Pair on the authenticated page for the QR) and you're paired.
+Vibe keeps running on the laptop the whole time: baton speaks
+stdio/JSON-RPC to `vibe-acp` locally and plain WebSocket+JSON outward, so
+execution stays local — only the *authority* moves. Note the privacy line is
+narrower than "nothing leaves the machine": Telegram receives card details
+and assistant output and carries prompts you type there. Browser voice audio
+and tool-call inputs go to Mistral for transcription and risk summaries.
+Off-LAN, `./tunnel.sh` (cloudflared) gives an
+`https://` URL, which voice/face need anyway since browsers block
+`getUserMedia` on plain `http://` LAN origins.
 
 **Could it work over Telegram / Slack / a watch?**
 The bridge is just a WebSocket protocol — any client can subscribe to
 permission requests and post answers; first answer wins and the other cards
-dismiss. Telegram already works — see below. The browser is the richest
-client, not the only one.
+dismiss. A Telegram client exists but is paused pending a security gate —
+see above. The browser is the richest client, not the only one.
 
 **Where are the extra features? How do I turn them on?**
 - 🙆 **Face** — a "nod or shake your answer" button on every permission card.

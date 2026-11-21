@@ -675,8 +675,7 @@ function faceAct(yes){
 
 $('pairBtn').onclick = ()=>{
   $('qrimg').src = '/qr.png?token=' + token;
-  $('qrurl').innerHTML = 'scan to watch this session on another device<br>' +
-    '<span style="color:var(--acc)">local-first: approvals ride ACP on your network — nothing leaves the machine</span>';
+  $('qrurl').textContent = 'Scan on a trusted LAN. This QR contains the access token; do not share it.';
   $('qr').className = 'open';
 };
 
