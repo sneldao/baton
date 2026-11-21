@@ -100,6 +100,14 @@ function onMsg(m){
     return;
   }
   if (m.type === 'agent_request') return onAgentRequest(m);
+  if (m.type === 'agent_resolved') {
+    if (permRequest && permRequest.requestId === m.requestId) {
+      $('perm').style.display = 'none';
+      permRequest = null;
+      toast('answered elsewhere');
+    }
+    return;
+  }
   if (m.type === 'error') return toast(m.message);
   if (m.method === 'bridge/status') {
     $('status').textContent = m.params.state;

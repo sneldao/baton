@@ -16,6 +16,9 @@ phone browser (PWA)  ──WebSocket──▶  baton  ──stdio/JSON-RPC──
   *speak* your answer: phone mic → Voxtral → approve/reject
 - Voice dictation for prompts (Voxtral)
 - QR pairing over LAN, bearer-token auth
+- **Pending approvals survive refresh/reconnect** — the bridge owns request
+  state and replays it to any client that (re)connects; first answer wins,
+  other clients' cards dismiss automatically
 - Stop a running turn (`session/cancel`)
 
 ## Run
@@ -27,6 +30,12 @@ MISTRAL_API_KEY=… ./run.sh /path/to/vibe/fork   # the team's fork
 ```
 
 Then open the printed URL on your phone (or scan `/qr.png` on the host).
+
+**Voice needs HTTPS.** `getUserMedia` is blocked on `http://<lan-ip>` — over
+plain LAN the mic button silently fails. For the voice demo run
+`./tunnel.sh` (cloudflared) and open the printed
+`https://*.trycloudflare.com/?token=…` URL instead. Tap approvals work fine
+on plain HTTP.
 
 Config env vars: `PORT` (8765), `VIBE_ACP_CMD` (any command, see `run.sh`),
 `BATON_TOKEN` (default: random per launch).
@@ -65,6 +74,13 @@ pre-commit run --all-files
 Hooks: ruff lint/format, yaml/toml/json hygiene, `detect-private-key`,
 gitleaks. Never commit `MISTRAL_API_KEY` or `.env` — they stay in the
 environment or `~/.vibe/.env`.
+
+## Prior art
+
+Remote agent control exists (Paseo, Happier, HAPI — the issue author already
+uses Paseo). Baton is deliberately narrower: a small, focused approval
+console for Vibe that is reliable where a general-purpose UI breaks, and
+voice-native via Mistral's own Voxtral rather than a bolted-on assistant.
 
 ## Demo story
 

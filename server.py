@@ -68,6 +68,9 @@ class AcpBridge:
         self.next_id = 0
         self.pending: dict[int, asyncio.Future] = {}
         self.pending_agent_requests: dict[int, asyncio.Task] = {}
+        # Outstanding agent->client requests, replayed to clients that connect
+        # or reconnect so a phone refresh never loses a pending approval.
+        self.outstanding_requests: dict[int, dict] = {}
         self.clients: set[web.WebSocketResponse] = set()
         self.initialized = False
         self.auth_methods: list = []
@@ -157,6 +160,7 @@ class AcpBridge:
             await asyncio.sleep(AGENT_REQUEST_TIMEOUT)
             if req_id in self.pending_agent_requests:
                 self.pending_agent_requests.pop(req_id)
+                self.outstanding_requests.pop(req_id, None)
                 await self._send(
                     {
                         "jsonrpc": "2.0",
@@ -164,28 +168,36 @@ class AcpBridge:
                         "error": {"code": -32601, "message": "client did not answer"},
                     }
                 )
+                await self.broadcast({"type": "agent_resolved", "requestId": req_id})
 
         self.pending_agent_requests[req_id] = asyncio.create_task(timeout_answer())
-        await self.broadcast(
-            {
-                "type": "agent_request",
-                "requestId": req_id,
-                "method": method,
-                "params": msg.get("params", {}),
-            }
-        )
+        forwarded = {
+            "type": "agent_request",
+            "requestId": req_id,
+            "method": method,
+            "params": msg.get("params", {}),
+        }
+        self.outstanding_requests[req_id] = forwarded
+        await self.broadcast(forwarded)
+
+    async def _resolve(self, req_id: int) -> asyncio.Task | None:
+        self.outstanding_requests.pop(req_id, None)
+        task = self.pending_agent_requests.pop(req_id, None)
+        if task is None:
+            return None
+        task.cancel()
+        await self.broadcast({"type": "agent_resolved", "requestId": req_id})
+        return task
 
     async def answer_agent_request(self, req_id: int, result: dict) -> bool:
-        if req_id not in self.pending_agent_requests:
+        if await self._resolve(req_id) is None:
             return False
-        self.pending_agent_requests.pop(req_id).cancel()
         await self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
         return True
 
     async def error_agent_request(self, req_id: int, error: dict | str) -> bool:
-        if req_id not in self.pending_agent_requests:
+        if await self._resolve(req_id) is None:
             return False
-        self.pending_agent_requests.pop(req_id).cancel()
         err = error if isinstance(error, dict) else {"code": -32601, "message": error}
         await self._send({"jsonrpc": "2.0", "id": req_id, "error": err})
         return True
@@ -257,6 +269,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             },
         }
     )
+    # Replay requests still awaiting an answer (covers refresh/reconnect).
+    for req in bridge.outstanding_requests.values():
+        await ws.send_json(req)
     try:
         async for raw in ws:
             if raw.type != web.WSMsgType.TEXT:
