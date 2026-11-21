@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import socket
@@ -178,7 +179,57 @@ class AcpBridge:
             "params": msg.get("params", {}),
         }
         self.outstanding_requests[req_id] = forwarded
+        # trust dial: low-risk tool calls may auto-approve; one-way doors never do
+        decision, meta = await self._policy_decide(method, msg.get("params", {}))
+        if decision is not None:
+            await self._resolve(req_id)
+            await self._send({"jsonrpc": "2.0", "id": req_id, "result": decision})
+            await self.broadcast(
+                {
+                    "type": "auto_approved",
+                    "requestId": req_id,
+                    "method": method,
+                    "params": msg.get("params", {}),
+                    **meta,
+                }
+            )
+            return
         await self.broadcast(forwarded)
+
+    async def _policy_decide(
+        self, method: str, params: dict
+    ) -> tuple[dict | None, dict]:
+        """Graduated trust: auto-approve low risk, always escalate one-way doors."""
+        if not POLICY["auto_low"] or method != "session/request_permission":
+            return None, {}
+        tc = params.get("toolCall") or {}
+        if ONE_WAY_DOORS.search(tool_call_text(tc)):
+            return None, {}
+        risk = await risk_annotate(tc)
+        if risk.get("risk") != "low":
+            return None, {}
+        opts = params.get("options") or []
+        allow = next(
+            (o for o in opts if o.get("kind") == "allow_once"),
+            None,
+        ) or next(
+            (
+                o
+                for o in opts
+                if str(o.get("kind", "")).startswith("allow")
+                and o.get("kind") != "allow_always"
+            ),
+            None,
+        )
+        if not allow:
+            return None, {}
+        result = {
+            "outcome": {
+                "outcome": "selected",
+                "optionId": allow.get("optionId") or allow.get("id"),
+            }
+        }
+        return result, {"summary": risk.get("summary", ""), "risk": "low"}
 
     async def _resolve(self, req_id: int) -> asyncio.Task | None:
         self.outstanding_requests.pop(req_id, None)
@@ -343,6 +394,23 @@ async def voice(request: web.Request) -> web.Response:
     return web.json_response(resp.json())
 
 
+POLICY = {"auto_low": False}
+
+# one-way doors: destructive/irreversible actions always reach a human,
+# regardless of how confident the risk classifier is
+ONE_WAY_DOORS = re.compile(
+    r"\b(rm\s+(-\w+\s+)*-?rf?\b|git\s+push\b[^|;&]*(--force|-f\b)|"
+    r"git\s+reset\s+--hard|drop\s+(table|database)|mkfs\b|dd\s+if=|"
+    r"chmod\s+-R\s+777|npm\s+publish|pip\s+uninstall|brew\s+uninstall|"
+    r"shutdown\b|reboot\b|killall\b|pkill\b)",
+    re.IGNORECASE,
+)
+
+
+def tool_call_text(tc: dict) -> str:
+    return (tc.get("title") or "") + " " + json.dumps(tc.get("rawInput") or tc)
+
+
 RISK_PROMPT = (
     "You annotate permission requests for a coding agent's remote approval "
     "console. Given a tool call, reply with EXACTLY one JSON object: "
@@ -351,44 +419,57 @@ RISK_PROMPT = (
 )
 
 
+async def risk_annotate(tc: dict) -> dict:
+    """One-line risk annotation for a tool call, via Mistral."""
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        return {"summary": "", "risk": ""}
+    user = f"Tool call title: {tc.get('title', '?')}\nInput: {json.dumps(tc.get('rawInput'))[:800]}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": os.environ.get("BATON_RISK_MODEL", "mistral-small-latest"),
+                    "messages": [
+                        {"role": "system", "content": RISK_PROMPT},
+                        {"role": "user", "content": user},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 120,
+                },
+            )
+        if resp.status_code != 200:
+            return {"summary": "", "risk": ""}
+        content = resp.json()["choices"][0]["message"]["content"]
+        out = json.loads(content)
+        return {"summary": out.get("summary", ""), "risk": out.get("risk", "")}
+    except Exception:
+        return {"summary": "", "risk": ""}
+
+
 async def summarize(request: web.Request) -> web.Response:
     """One-line risk annotation for a permission request, via Mistral."""
     if not check_token(request):
         return web.Response(status=401, text="bad token")
-    api_key = os.environ.get("MISTRAL_API_KEY")
-    if not api_key:
+    if not os.environ.get("MISTRAL_API_KEY"):
         return web.json_response(
             {"error": "MISTRAL_API_KEY not set on bridge"}, status=503
         )
     body = await request.json()
-    tc = body.get("toolCall", {})
-    user = f"Tool call title: {tc.get('title', '?')}\nInput: {json.dumps(tc.get('rawInput'))[:800]}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": os.environ.get("BATON_RISK_MODEL", "mistral-small-latest"),
-                "messages": [
-                    {"role": "system", "content": RISK_PROMPT},
-                    {"role": "user", "content": user},
-                ],
-                "response_format": {"type": "json_object"},
-                "max_tokens": 120,
-            },
-        )
-    if resp.status_code != 200:
-        return web.json_response(
-            {"error": f"mistral {resp.status_code}: {resp.text[:200]}"}, status=502
-        )
-    try:
-        content = resp.json()["choices"][0]["message"]["content"]
-        out = json.loads(content)
-        return web.json_response(
-            {"summary": out.get("summary", ""), "risk": out.get("risk", "")}
-        )
-    except (KeyError, IndexError, json.JSONDecodeError):
-        return web.json_response({"summary": "", "risk": ""})
+    return web.json_response(await risk_annotate(body.get("toolCall", {})))
+
+
+async def policy(request: web.Request) -> web.Response:
+    """Trust dial: get/set the auto-approval policy."""
+    if not check_token(request):
+        return web.Response(status=401, text="bad token")
+    if request.method == "POST":
+        body = await request.json()
+        POLICY["auto_low"] = bool(body.get("auto_low"))
+        await bridge.broadcast({"type": "policy", **POLICY})
+    return web.json_response(POLICY)
 
 
 async def qr_png(request: web.Request) -> web.Response:
@@ -417,6 +498,8 @@ def main() -> None:
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/voice", voice)
     app.router.add_post("/api/summarize", summarize)
+    app.router.add_get("/api/policy", policy)
+    app.router.add_post("/api/policy", policy)
     app.router.add_get("/qr.png", qr_png)
     app.router.add_static("/static", STATIC)
     app.on_startup.append(on_startup)
