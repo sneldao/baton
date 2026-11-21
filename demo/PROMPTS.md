@@ -39,6 +39,21 @@ it's a steering wheel."
 
 Pure streaming beat. Use if a prompt whiffs, or as a breather.
 
+## The before/after (judge-requested format)
+
+Mistral staff ask for "task X takes Y before, Z after." Ours:
+
+- **Before**: in `ask` mode an unattended task waits as long as you're gone
+  (minutes–hours); alternatives are babysitting or blanket auto-approve.
+- **After**: approval latency ≈ notification latency (~10s, from anywhere);
+  one-way doors still reach a human while low-risk calls flow through.
+
+Time the corridor approval live — it's the Z in the sentence.
+
+**Mistral Web contrast line**: "Mistral Web teleports the session to the
+browser; baton is the reverse path — it teleports *you* back into the local
+session, from any pocket device. They move the work; we move the authority."
+
 ## Reliability rules
 
 - One session, three prompts — don't create sessions mid-demo.
