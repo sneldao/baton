@@ -186,7 +186,7 @@ class AcpBridge:
             await self._send({"jsonrpc": "2.0", "id": req_id, "result": decision})
             await self.broadcast(
                 {
-                    "type": "auto_approved",
+                    "type": "auto_decided",
                     "requestId": req_id,
                     "method": method,
                     "params": msg.get("params", {}),
@@ -199,37 +199,63 @@ class AcpBridge:
     async def _policy_decide(
         self, method: str, params: dict
     ) -> tuple[dict | None, dict]:
-        """Graduated trust: auto-approve low risk, always escalate one-way doors."""
-        if not POLICY["auto_low"] or method != "session/request_permission":
+        """Three-tier trust: deny rules refuse outright, allow/low-risk auto-pass,
+        one-way doors always escalate to a human."""
+        if method != "session/request_permission":
             return None, {}
         tc = params.get("toolCall") or {}
-        if ONE_WAY_DOORS.search(tool_call_text(tc)):
+        text = tool_call_text(tc).lower()
+
+        for rule in POLICY.get("deny") or []:
+            if rule.lower() in text:
+                return {"outcome": {"outcome": "cancelled"}}, {
+                    "action": "denied",
+                    "rule": rule,
+                }
+
+        if ONE_WAY_DOORS.search(text):
+            return None, {}
+
+        opts = params.get("options") or []
+
+        def allow_once():
+            o = next((x for x in opts if x.get("kind") == "allow_once"), None) or next(
+                (
+                    x
+                    for x in opts
+                    if str(x.get("kind", "")).startswith("allow")
+                    and x.get("kind") != "allow_always"
+                ),
+                None,
+            )
+            if not o:
+                return None
+            return {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": o.get("optionId") or o.get("id"),
+                }
+            }
+
+        for rule in POLICY.get("allow") or []:
+            if rule.lower() in text:
+                r = allow_once()
+                if r:
+                    return r, {"action": "allowed", "rule": rule}
+
+        if not POLICY["auto_low"]:
             return None, {}
         risk = await risk_annotate(tc)
         if risk.get("risk") != "low":
             return None, {}
-        opts = params.get("options") or []
-        allow = next(
-            (o for o in opts if o.get("kind") == "allow_once"),
-            None,
-        ) or next(
-            (
-                o
-                for o in opts
-                if str(o.get("kind", "")).startswith("allow")
-                and o.get("kind") != "allow_always"
-            ),
-            None,
-        )
-        if not allow:
+        r = allow_once()
+        if not r:
             return None, {}
-        result = {
-            "outcome": {
-                "outcome": "selected",
-                "optionId": allow.get("optionId") or allow.get("id"),
-            }
+        return r, {
+            "action": "auto-approved",
+            "summary": risk.get("summary", ""),
+            "risk": "low",
         }
-        return result, {"summary": risk.get("summary", ""), "risk": "low"}
 
     async def _resolve(self, req_id: int) -> asyncio.Task | None:
         self.outstanding_requests.pop(req_id, None)
@@ -394,7 +420,13 @@ async def voice(request: web.Request) -> web.Response:
     return web.json_response(resp.json())
 
 
-POLICY = {"auto_low": False}
+# Claude Code-style allow/ask/deny policy. Precedence:
+#   deny rules → one-way doors (always ask) → allow rules → low-risk (auto_low) → ask
+POLICY = {
+    "auto_low": False,
+    "deny": [".env", "id_rsa", ".aws/credentials", "secret", "api_key"],
+    "allow": [],
+}
 
 # one-way doors: destructive/irreversible actions always reach a human,
 # regardless of how confident the risk classifier is
@@ -467,7 +499,12 @@ async def policy(request: web.Request) -> web.Response:
         return web.Response(status=401, text="bad token")
     if request.method == "POST":
         body = await request.json()
-        POLICY["auto_low"] = bool(body.get("auto_low"))
+        if "auto_low" in body:
+            POLICY["auto_low"] = bool(body["auto_low"])
+        if "deny" in body:
+            POLICY["deny"] = list(body["deny"])
+        if "allow" in body:
+            POLICY["allow"] = list(body["allow"])
         await bridge.broadcast({"type": "policy", **POLICY})
     return web.json_response(POLICY)
 

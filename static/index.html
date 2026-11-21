@@ -227,10 +227,11 @@ function onMsg(m){
     $('autoBtn').style.color = autoLow ? 'var(--acc)' : '';
     return;
   }
-  if (m.type === 'auto_approved') {
+  if (m.type === 'auto_decided') {
     const title = ((m.params||{}).toolCall||{}).title || 'tool call';
-    tick('⚡ auto-approved (low risk): ' + title);
-    toast('auto-approved: ' + title + (m.summary ? ' — ' + m.summary : ''));
+    const denied = m.action === 'denied';
+    tick((denied ? '⛔ denied by rule' : '⚡ auto-approved') + ': ' + title);
+    toast((denied ? `blocked — matched deny rule "${m.rule}"` : 'auto-approved' + (m.summary ? ': ' + m.summary : '')), 3500);
     if (permRequest && permRequest.requestId === m.requestId) {
       $('perm').style.display='none'; permRequest=null; setAmbient();
     }
