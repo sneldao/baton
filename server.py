@@ -1,4 +1,4 @@
-"""vibe-remote: drive Mistral Vibe sessions from a phone/browser.
+"""baton: drive Mistral Vibe sessions from a phone/browser.
 
 Spawns `vibe-acp` (Agent Client Protocol, JSON-RPC over stdio) and bridges it
 to browsers over WebSocket. Browsers get live session updates, can prompt,
@@ -25,7 +25,7 @@ from aiohttp import web
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
 )
-log = logging.getLogger("vibe-remote")
+log = logging.getLogger("baton")
 
 STATIC = Path(__file__).parent / "static"
 PORT = int(os.environ.get("PORT", "8765"))
@@ -93,7 +93,7 @@ class AcpBridge:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": CLIENT_CAPABILITIES,
-                    "clientInfo": {"name": "vibe-remote", "version": "0.1.0"},
+                    "clientInfo": {"name": "baton", "version": "0.1.0"},
                 },
             )
             self.initialized = True
@@ -359,7 +359,7 @@ def main() -> None:
 
     base = f"http://{lan_ip()}:{PORT}"
     print(
-        f"\n  vibe-remote listening"
+        f"\n  baton listening"
         f"\n  pair your phone: {base}/?token={TOKEN}"
         f"\n  QR code: {base}/qr.png  (open on the host screen)\n"
     )

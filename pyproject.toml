@@ -1,5 +1,5 @@
 [project]
-name = "vibe-remote"
+name = "baton"
 version = "0.1.0"
 description = "Remote control for Mistral Vibe: drive vibe-acp sessions from your phone (issue #1535)"
 requires-python = ">=3.12"

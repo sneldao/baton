@@ -693,7 +693,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vibe-remote"
+name = "baton"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

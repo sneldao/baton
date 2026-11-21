@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>vibe-remote</title>
+<title>baton</title>
 <style>
   :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --card:#161b22; --acc:#f97316; --ok:#3fb950; --bad:#f85149; }
   * { box-sizing:border-box; margin:0 }
@@ -43,7 +43,7 @@
 </head>
 <body>
 <header>
-  <div id="dot"></div><b>vibe-remote</b>
+  <div id="dot"></div><b>baton</b>
   <span id="status" style="color:var(--dim);font-size:11px"></span>
   <div class="spacer"></div>
   <select id="modeSel" style="background:var(--card);color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:6px;font:inherit;font-size:11px"></select>
@@ -142,7 +142,7 @@ function onAgentRequest(m){
   if (m.method === 'session/request_permission') return showPerm(m);
   // auto-decline requests we can't serve (fs, terminal, …)
   ws.send(JSON.stringify({type:'agent_response', requestId:m.requestId,
-    error:{code:-32601, message:'unsupported by vibe-remote'}}));
+    error:{code:-32601, message:'unsupported by baton'}}));
 }
 
 function showPerm(m){

@@ -1,11 +1,11 @@
-# vibe-remote
+# baton
 
 Drive **Mistral Vibe** from your phone. Native remote mode for
 [mistral-vibe#1535](https://github.com/mistralai/mistral-vibe/issues/1535) —
 built on `vibe-acp` (Agent Client Protocol), voice-native via **Voxtral**.
 
 ```
-phone browser (PWA)  ──WebSocket──▶  vibe-remote  ──stdio/JSON-RPC──▶  vibe-acp
+phone browser (PWA)  ──WebSocket──▶  baton  ──stdio/JSON-RPC──▶  vibe-acp
 ```
 
 ## Features
