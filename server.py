@@ -36,9 +36,13 @@ TOKEN = os.environ.get("BATON_TOKEN") or secrets.token_urlsafe(12)
 def _default_acp_cmd() -> str:
     import shutil
 
+    # Prefer the sibling repo clone: PATH-installed vibe-acp boots its
+    # app server for minutes on some machines (verified slower live).
+    sibling = Path(__file__).parent.parent / "mistral-vibe"
+    if sibling.is_dir():
+        return f"uv run --directory {sibling} vibe-acp"
     if shutil.which("vibe-acp"):
         return "vibe-acp"
-    sibling = Path(__file__).parent.parent / "mistral-vibe"
     return f"uv run --directory {sibling} vibe-acp"
 
 
@@ -87,6 +91,8 @@ class AcpBridge:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ},
+            # vibe-acp emits single JSON lines >64KB; default limit kills reader
+            limit=16 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
