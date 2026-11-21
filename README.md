@@ -66,6 +66,29 @@ Voxtral). On macOS `run.sh` inherits the credential vibe-acp stored in the
 vars. Vibe-side sessions use the auth and model configured in `~/.vibe`
 (the account's catalog default, e.g. `mistral-large-4-0`).
 
+**Telegram client.** `tools/telegram_bridge.py` turns any chat into another
+baton device: permission requests arrive as messages with inline
+approve/deny buttons, plus `/new`, `/stop`, `/auto`, `/policy` commands and
+agent replies. First answer wins across phone, stage and Telegram.
+
+```bash
+# .env (gitignored): TELEGRAM_BOT_TOKEN=… from @BotFather
+BATON_TOKEN=<token server.py printed> ./telegram.sh
+# then /start the bot in Telegram — pending cards replay on reconnect
+```
+
+Optional: `TELEGRAM_CHAT_ID` pins the bridge to one chat; `BATON_WS` /
+`BATON_HTTP` override the default `localhost:8765` endpoints.
+
+**Testing / rehearsal drivers.** `tools/drive.py` creates a session and
+prompts it (optionally `--auto-answer N`); `tools/task.py` prompts an
+existing session id. Both print every protocol event — useful for a second
+"laptop" participant or for verifying a new client sees cards replay.
+
+If cloudflared can't reach its edge (some VPNs block argotunnel), any
+TLS tunnel works — e.g. `ngrok http 8765` — the app only needs an `https://`
+origin for mic/camera.
+
 Config env vars: `PORT` (8765), `VIBE_ACP_CMD` (any command, see `run.sh`),
 `BATON_TOKEN` (default: random per launch), `BATON_RISK_MODEL`
 (default `mistral-small-latest`), `BATON_NO_AGENT` (skip Agents API).
@@ -123,6 +146,11 @@ voice-native via Mistral's own Voxtral rather than a bolted-on assistant.
 Start a refactor at your desk → walk away → permission prompt vibrates on
 your phone → say "yes, go ahead" → Voxtral transcribes → agent keeps working.
 
+Demo prompt tip: commands already in `~/.vibe` bash allowlist (`ls`, `cat`,
+`grep`, `git status`…) run without asking — that's the feature. To get a
+card, prompt something outside it: `mkdir`, `curl`, `python`, `rm`, a file
+write, or `git commit`.
+
 ## FAQ
 
 **How does it get to my phone? Does Vibe need to run there?**
@@ -137,8 +165,8 @@ browsers block `getUserMedia` on plain `http://` LAN origins.
 **Could it work over Telegram / Slack / a watch?**
 The bridge is just a WebSocket protocol — any client can subscribe to
 permission requests and post answers; first answer wins and the other cards
-dismiss. A Telegram bot with inline buttons is ~100 lines of adapter. The
-browser is the richest client, not the only possible one.
+dismiss. Telegram already works — see below. The browser is the richest
+client, not the only one.
 
 **Where are the extra features? How do I turn them on?**
 - 🙆 **Face** — a "nod or shake your answer" button on every permission card.

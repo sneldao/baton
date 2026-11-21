@@ -81,8 +81,9 @@
   /* ── the hero: decision card ─────────────────────────── */
   #perm {
     display:none; margin:0 14px 14px;
+    max-height:min(70dvh, 640px); overflow-y:auto; overscroll-behavior:contain;
     background:linear-gradient(180deg,#221a10,#1a130b);
-    border:1px solid #6b4a22; border-radius:18px; overflow:hidden;
+    border:1px solid #6b4a22; border-radius:18px;
     box-shadow:0 0 0 1px rgba(255,130,0,.12), 0 20px 70px rgba(0,0,0,.6), 0 0 60px rgba(255,130,0,.14);
     animation:spring .45s cubic-bezier(.2,1.5,.3,1), pulse 1.8s 2 .4s;
   }
@@ -91,7 +92,7 @@
   #perm .eyebrow { display:flex; align-items:baseline; gap:10px; margin-bottom:10px }
   #perm h3 { font-family:var(--disp); font-size:19px; letter-spacing:.05em; text-transform:uppercase; color:var(--acc) }
   #permClock { font-family:var(--mono); font-size:13px; color:var(--acc); margin-left:auto; letter-spacing:.06em; animation:blink 1.2s infinite }
-  #permBody { font-family:var(--mono); font-size:12px; color:var(--dim); background:rgba(0,0,0,.35); border:1px solid var(--line); border-radius:10px; padding:10px 12px; max-height:96px; overflow:auto; margin-bottom:12px; white-space:pre-wrap }
+  #permBody { font-family:var(--mono); font-size:12px; color:var(--dim); background:rgba(0,0,0,.35); border:1px solid var(--line); border-radius:10px; padding:10px 12px; max-height:96px; overflow:auto; margin-bottom:12px; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word }
   .risk { font-family:var(--mono); font-size:12px; border-radius:10px; padding:9px 12px; margin-bottom:12px; display:none; border-left:3px solid transparent }
   .risk.low { background:rgba(52,209,123,.08); color:var(--ok); border-left-color:var(--ok); display:block }
   .risk.medium { background:rgba(255,130,0,.08); color:var(--acc); border-left-color:var(--acc); display:block }
@@ -150,7 +151,7 @@
   body.stage #log { display:flex; padding:8px 40px; font-size:16px; justify-content:flex-end; gap:8px }
   body.stage .msg { font-size:17px; max-width:72% }
   body.stage .tool { font-size:16px; padding:7px 14px }
-  body.stage #perm { margin:8px 32px 20px; border-radius:22px }
+  body.stage #perm { margin:8px 32px 20px; border-radius:22px; max-height:78dvh }
   body.stage #perm .inner { padding:20px 34px 22px }
   body.stage #perm h3 { font-size:clamp(34px,5vw,52px) }
   body.stage #permClock { font-size:clamp(22px,3vw,34px) }
@@ -168,15 +169,15 @@
      One-shot entrances/stamps still play; ambient motion freezes. */
   body.calm .stripe, body.calm .live, body.calm #perm, body.calm #permClock { animation: none }
 
-  /* compact header on phones — controls scroll instead of colliding */
+  /* compact header on phones — controls wrap to a second row, never scroll */
   @media (max-width:680px){
-    header { padding:10px 12px; gap:6px; overflow-x:auto; scrollbar-width:none }
-    header::-webkit-scrollbar { display:none }
+    header { padding:10px 12px 8px; gap:8px; flex-wrap:wrap }
     header .tag { display:none }
     .wordmark { font-size:17px; white-space:nowrap }
+    .spacer { flex-basis:100%; height:0 }
     button,.btn { padding:8px 10px; font-size:12px; white-space:nowrap }
     .iconbtn { padding:8px 9px }
-    select { max-width:84px; font-size:10px }
+    select { max-width:88px; font-size:10px }
     #pill { padding:3px 8px; font-size:9px }
   }
 </style>
