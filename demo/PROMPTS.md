@@ -1,7 +1,13 @@
 # Canned demo prompts
 
-Send these against **this directory** (`baton/demo/`) in an `ask`-mode
-session. Every prompt is short and output-bounded on purpose — long agent
+Send these against **this directory** (`baton/demo/`).
+
+**Set the mode to `ask` first** — new sessions default to `accept-edits`,
+which silently auto-approves file edits and kills the demo's permission
+beats. Bash commands still prompt in any mode; file edits only prompt
+in `ask`.
+
+Every prompt is short and output-bounded on purpose — long agent
 monologues kill pacing. Rehearse each once; model behavior varies.
 
 ## Beat 1 — approve (the mundane task)
