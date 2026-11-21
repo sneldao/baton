@@ -230,6 +230,9 @@ class AcpBridge:
         for ws in dead:
             self.clients.discard(ws)
 
+    async def broadcast_client_count(self) -> None:
+        await self.broadcast({"type": "bridge/clients", "count": len(self.clients)})
+
     async def shutdown(self) -> None:
         if self.proc and self.proc.returncode is None:
             self.proc.terminate()
@@ -259,6 +262,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     bridge.clients.add(ws)
+    await bridge.broadcast_client_count()
     await ws.send_json(
         {
             "method": "bridge/status",
@@ -283,6 +287,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             await handle_client_msg(ws, msg)
     finally:
         bridge.clients.discard(ws)
+        await bridge.broadcast_client_count()
     return ws
 
 
@@ -338,6 +343,54 @@ async def voice(request: web.Request) -> web.Response:
     return web.json_response(resp.json())
 
 
+RISK_PROMPT = (
+    "You annotate permission requests for a coding agent's remote approval "
+    "console. Given a tool call, reply with EXACTLY one JSON object: "
+    '{"summary": "one short sentence a non-expert understands", '
+    '"risk": "low|medium|high"}. No markdown, no extra text.'
+)
+
+
+async def summarize(request: web.Request) -> web.Response:
+    """One-line risk annotation for a permission request, via Mistral."""
+    if not check_token(request):
+        return web.Response(status=401, text="bad token")
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        return web.json_response(
+            {"error": "MISTRAL_API_KEY not set on bridge"}, status=503
+        )
+    body = await request.json()
+    tc = body.get("toolCall", {})
+    user = f"Tool call title: {tc.get('title', '?')}\nInput: {json.dumps(tc.get('rawInput'))[:800]}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": os.environ.get("BATON_RISK_MODEL", "mistral-small-latest"),
+                "messages": [
+                    {"role": "system", "content": RISK_PROMPT},
+                    {"role": "user", "content": user},
+                ],
+                "response_format": {"type": "json_object"},
+                "max_tokens": 120,
+            },
+        )
+    if resp.status_code != 200:
+        return web.json_response(
+            {"error": f"mistral {resp.status_code}: {resp.text[:200]}"}, status=502
+        )
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+        out = json.loads(content)
+        return web.json_response(
+            {"summary": out.get("summary", ""), "risk": out.get("risk", "")}
+        )
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return web.json_response({"summary": "", "risk": ""})
+
+
 async def qr_png(request: web.Request) -> web.Response:
     import io
 
@@ -363,6 +416,7 @@ def main() -> None:
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/voice", voice)
+    app.router.add_post("/api/summarize", summarize)
     app.router.add_get("/qr.png", qr_png)
     app.router.add_static("/static", STATIC)
     app.on_startup.append(on_startup)

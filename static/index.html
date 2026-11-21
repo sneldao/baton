@@ -91,10 +91,36 @@
   #qr.open { display:flex }
   #qr img { width:min(72vw,320px); border-radius:16px; border:4px solid var(--surface2) }
   #qr p { color:var(--dim); font-size:12px; text-align:center; padding:0 24px }
+
+  /* ── stage mode: projected mission-control (?stage) ──── */
+  body.stage header, body.stage #sessions, body.stage #composer, body.stage #log { display:none }
+  .stagebar { display:none; align-items:center; gap:16px; padding:18px 28px }
+  body.stage .stagebar { display:flex }
+  .stagebar .wordmark { font-size:34px }
+  .stagebar .tag { font-size:13px }
+  #devices { margin-left:auto; font-size:14px; color:var(--dim); background:var(--surface); border:1px solid var(--line); border-radius:99px; padding:8px 16px }
+  #devices b { color:var(--acc) }
+  body.stage #perm { margin:0 28px 28px; }
+  body.stage #perm h3 { font-size:32px }
+  body.stage #permBody { font-size:20px; max-height:30vh }
+  body.stage #perm .opts button { font-size:26px; padding:26px }
+  body.stage #permMic { font-size:18px; padding:18px }
+  #ticker { display:none; align-items:center; gap:14px; overflow:hidden; white-space:nowrap; padding:14px 28px; border-top:1px solid var(--line); font-size:15px; color:var(--dim) }
+  body.stage #ticker { display:flex }
+  #ticker .live { color:var(--acc); font-weight:700; letter-spacing:.1em }
+  .risk { font-size:12px; border-radius:8px; padding:8px 10px; margin-bottom:10px; display:none }
+  .risk.low { background:#0d2818; color:var(--ok); display:block }
+  .risk.medium { background:#2d2106; color:var(--acc); display:block }
+  .risk.high { background:#2a1215; color:var(--bad); display:block }
+  #permInner { touch-action:none }
 </style>
 </head>
 <body>
 <div class="stripe"></div>
+<div class="stagebar">
+  <div><div class="wordmark">bat<em>on</em></div><div class="tag">vibe in your hands</div></div>
+  <div id="devices"><b>0</b> devices watching</div>
+</div>
 <header>
   <div>
     <div class="wordmark">bat<em>on</em></div>
@@ -111,8 +137,9 @@
 <div id="sessions"></div>
 <div id="log"></div>
 <div id="perm">
-  <div class="inner">
+  <div class="inner" id="permInner">
     <h3>Approval requested</h3>
+    <div class="risk" id="permRisk"></div>
     <pre id="permBody"></pre>
     <div class="opts" id="permOpts"></div>
     <div class="voicerow"><button id="permMic">🎙 speak your answer</button>
@@ -125,10 +152,13 @@
   <button id="stop" class="iconbtn" style="display:none">■</button>
   <button id="send">Send</button>
 </div>
+<div id="ticker"><span class="live">● LIVE</span><span id="tickertext">waiting for the agent…</span></div>
 <div id="toast"></div>
 <div id="qr"><img id="qrimg" alt="pair QR"><p id="qrurl"></p><button onclick="document.getElementById('qr').className=''">close</button></div>
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
+const qs = new URLSearchParams(location.search);
+const token = qs.get('token') || '';
+if (qs.has('stage')) document.body.className = 'stage';
 const $ = id => document.getElementById(id);
 let ws, sessionId = null, cwd = null, curAgentEl = null, nextId = 0;
 let lastAgentText = '', narrationOn = false, turnActive = false;
@@ -160,10 +190,33 @@ function setAmbient(){
     'stripe' + (permRequest ? ' waiting' : (turnActive ? ' working' : ''));
 }
 
+// sonic signature: two-tone chime on approval requests
+let _ac = null;
+function ding(){
+  try {
+    _ac = _ac || new (window.AudioContext||window.webkitAudioContext)();
+    [880, 1174.7].forEach((f,i)=>{
+      const o=_ac.createOscillator(), g=_ac.createGain();
+      o.frequency.value=f; o.connect(g); g.connect(_ac.destination);
+      const t=_ac.currentTime+i*0.12;
+      g.gain.setValueAtTime(0.001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.001,t+0.5);
+      o.start(t); o.stop(t+0.55);
+    });
+  } catch(e){}
+}
+document.addEventListener('pointerdown', ()=>{ try{(_ac=_ac||new (window.AudioContext||window.webkitAudioContext)()).resume();}catch(e){} }, {once:true});
+
+function tick(t){ $('tickertext').textContent = t; }
+
 function onMsg(m){
   if (m.id != null && rpcPending[m.id]) {
     const p = rpcPending[m.id]; delete rpcPending[m.id];
     m.error ? p.rej(new Error(m.error.message)) : p.res(m.result);
+    return;
+  }
+  if (m.type === 'bridge/clients') {
+    $('devices').innerHTML = `<b>${m.count}</b> device${m.count===1?'':'s'} watching`;
     return;
   }
   if (m.type === 'agent_request') return onAgentRequest(m);
@@ -195,12 +248,13 @@ function onUpdate(p){
     curAgentEl.scrollIntoView({block:'end'});
   } else if (t === 'tool_call'){
     curAgentEl=null;
+    tick('⚙ ' + (u.title||u.kind||'tool call'));
     const d = el('tool','');
     d.innerHTML = `<span>⚙ ${u.title||u.kind||'tool'}</span><span class="st">${u.status||''}</span>`;
     toolEls[u.toolCallId] = d;
   } else if (t === 'tool_call_update'){
     const d = toolEls[u.toolCallId];
-    if (d){ if (u.title) d.firstElementChild.textContent = '⚙ '+u.title;
+    if (d){ if (u.title) { d.firstElementChild.textContent = '⚙ '+u.title; tick('⚙ '+u.title+' — '+(u.status||'')); }
       d.querySelector('.st').textContent = u.status||'';
       d.className = 'tool ' + (u.status==='completed'?'ok':u.status==='failed'?'err':''); }
   } else if (t === 'current_mode_update'){
@@ -230,10 +284,28 @@ function showPerm(m){
   const c=document.createElement('button');
   c.textContent='✕ cancel'; c.className='deny';
   c.onclick=()=>answerPerm(null); box.appendChild(c);
+  $('permRisk').className='risk'; $('permRisk').textContent='';
   $('perm').style.display='block';
   setAmbient();
+  ding();
+  tick('⚠ approval requested: ' + (tc.title||'tool call'));
   if (navigator.vibrate) navigator.vibrate([200,100,200]);
   if (narrationOn) narrate(`Approval requested. ${tc.title||'Tool call'}`);
+  annotate(tc);
+}
+
+// Mistral one-line risk annotation for the card
+async function annotate(tc){
+  try {
+    const r = await fetch('/api/summarize?token='+token, {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({toolCall:tc})});
+    const j = await r.json();
+    if (j.summary && permRequest){
+      const e = $('permRisk');
+      e.textContent = `mistral: ${j.summary}`;
+      e.className = 'risk ' + (j.risk||'medium');
+    }
+  } catch(e){}
 }
 
 function answerPerm(optionId){
@@ -245,6 +317,7 @@ function answerPerm(optionId){
   $('perm').style.display='none';
   permRequest = null;
   setAmbient();
+  tick(optionId ? '✓ approved — agent continues' : '✕ rejected');
 }
 
 async function narrate(text){
@@ -371,6 +444,27 @@ $('narrBtn').onclick = ()=>{
   $('narrBtn').style.color = narrationOn ? 'var(--acc)' : '';
   toast(narrationOn ? 'agent narration ON — speaks on the host machine' : 'narration off');
 };
+// swipe-to-approve: right = approve once, left = reject (tinder for tool calls)
+(()=>{
+  const el = $('permInner'); let x0=null;
+  el.addEventListener('touchstart', e=>{ x0=e.touches[0].clientX; }, {passive:true});
+  el.addEventListener('touchmove', e=>{
+    if (x0==null) return;
+    const dx = e.touches[0].clientX-x0;
+    $('perm').style.transform = `translateX(${dx*0.5}px)`;
+  }, {passive:true});
+  el.addEventListener('touchend', e=>{
+    const dx = e.changedTouches[0].clientX - x0; x0=null;
+    $('perm').style.transform='';
+    if (!permRequest) return;
+    if (dx > 90){
+      const opts = permRequest.params.options||[];
+      const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
+      if (allow) answerPerm(allow.optionId);
+    } else if (dx < -90) answerPerm(null);
+  });
+})();
+
 $('pairBtn').onclick = ()=>{
   $('qrimg').src = '/qr.png?token=' + token;
   $('qrurl').innerHTML = 'scan to watch this session on another device<br>' +
