@@ -171,7 +171,13 @@ function toast(t, ms=2800){ const e=$('toast'); e.textContent=t; e.style.display
 
 function connect(){
   ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${token}`);
-  ws.onopen = () => { $('dot').className='on'; };
+  ws.onopen = () => { $('dot').className='on';
+    fetch('/api/policy?token='+token).then(r=>r.json()).then(p=>{
+      autoLow = p.auto_low;
+      $('autoBtn').style.borderColor = autoLow ? 'var(--acc)' : '';
+      $('autoBtn').style.color = autoLow ? 'var(--acc)' : '';
+    }).catch(()=>{});
+  };
   ws.onclose = () => { $('dot').className=''; $('status').textContent='reconnecting…'; setTimeout(connect, 2000); };
   ws.onmessage = ev => onMsg(JSON.parse(ev.data));
 }
@@ -494,16 +500,6 @@ $('autoBtn').onclick = async ()=>{
     toast(autoLow ? 'auto-approve ON for low-risk calls — one-way doors still reach you' : 'auto-approve off');
   } catch(e){ toast('policy: '+e.message); }
 };
-// sync initial policy once connected
-const _open0 = ws.onopen;
-ws.onopen = e => { _open0 && _open0(e);
-  fetch('/api/policy?token='+token).then(r=>r.json()).then(p=>{
-    autoLow = p.auto_low;
-    $('autoBtn').style.borderColor = autoLow ? 'var(--acc)' : '';
-    $('autoBtn').style.color = autoLow ? 'var(--acc)' : '';
-  }).catch(()=>{});
-};
-
 // face approval: nod = approve once, shake = reject (MediaPipe FaceLandmarker)
 let landmarker=null, faceCam=null, faceOn=false, faceSamples=[], lastFaceAct=0;
 $('faceBtn').onclick = ()=>{

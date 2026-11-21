@@ -20,6 +20,7 @@ def word_count(text: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog=APP_NAME, description=TAGLINE)
+    parser.add_argument("--version", action="version", version=APP_NAME)
     parser.add_argument("name", nargs="?", default="world")
     args = parser.parse_args(argv)
     print(greet(args.name))
