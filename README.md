@@ -8,6 +8,14 @@ built on `vibe-acp` (Agent Client Protocol), voice-native via **Voxtral**.
 phone browser (PWA)  ──WebSocket──▶  baton  ──stdio/JSON-RPC──▶  vibe-acp
 ```
 
+| your pocket | the room |
+|---|---|
+| ![remote approval on a phone](docs/images/phone-approval.png) | ![mission-control stage view](docs/images/stage-view.png) |
+
+Every permission request hits the phone, the projector (`?stage`), and
+every paired device at once — chime, vibration, live ticker, Mistral risk
+annotation, Voxtral voice answers.
+
 ## Features
 
 - List + resume sessions (`session/list` / `session/load`)
