@@ -70,7 +70,10 @@ vars. Vibe-side sessions use the auth and model configured in `~/.vibe`
 (the account's catalog default, e.g. `mistral-large-4-0`).
 
 **Telegram client (paused).** `tools/telegram_bridge.py` turns one private
-chat into another baton device: permission requests arrive as messages with
+chat into another baton device — bring your own bot:
+[docs/telegram-setup.md](docs/telegram-setup.md) has the full walkthrough
+(@BotFather token, chat-ID lookup, `.env`, launch, linking). Permission
+requests arrive as messages with
 inline Allow once / Deny buttons, plus `/new`, `/sessions`, `/stop`,
 `/policy`, `/status` commands and direct replies. Routine tool activity
 and streaming output stay in the browser. The Telegram picker resumes an
