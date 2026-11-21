@@ -75,6 +75,12 @@ Hooks: ruff lint/format, yaml/toml/json hygiene, `detect-private-key`,
 gitleaks. Never commit `MISTRAL_API_KEY` or `.env` — they stay in the
 environment or `~/.vibe/.env`.
 
+## Demo staging
+
+`demo/` is a sacrificial toy repo the agent works in — never point the
+demo at a real project. `demo/PROMPTS.md` has the canned prompt script:
+what to send, what each one produces, and the fallback ladder.
+
 ## Prior art
 
 Remote agent control exists (Paseo, Happier, HAPI — the issue author already
