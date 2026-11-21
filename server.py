@@ -451,19 +451,80 @@ RISK_PROMPT = (
 )
 
 
+RISK_AGENT_ID: str | None = None
+RISK_MODEL = os.environ.get("BATON_RISK_MODEL", "mistral-large-latest")
+
+
+async def _risk_agent_id(client: httpx.AsyncClient, api_key: str) -> str | None:
+    """Create (once) the Mistral Agent that adjudicates tool-call risk."""
+    global RISK_AGENT_ID
+    if RISK_AGENT_ID or os.environ.get("BATON_NO_AGENT"):
+        return RISK_AGENT_ID
+    try:
+        resp = await client.post(
+            "https://api.mistral.ai/v1/agents",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": RISK_MODEL,
+                "name": "baton-risk-assessor",
+                "description": "Judges remote permission requests for a coding agent",
+                "instructions": RISK_PROMPT,
+            },
+        )
+        if resp.status_code in (200, 201):
+            RISK_AGENT_ID = resp.json().get("id")
+    except Exception:
+        pass
+    return RISK_AGENT_ID
+
+
+def _conversation_text(payload: dict) -> str:
+    """Pull the assistant text out of a Conversations API response."""
+    for item in payload.get("outputs", []):
+        if item.get("type") in ("message.output", "message"):
+            content = item.get("content", "")
+            if isinstance(content, str):
+                return content
+            for part in content:
+                if part.get("type") in ("text", "output_text"):
+                    return part.get("text", "")
+    raise ValueError("no assistant text in conversation output")
+
+
 async def risk_annotate(tc: dict) -> dict:
-    """One-line risk annotation for a tool call, via Mistral."""
+    """Risk adjudication by a Mistral Agent (Le Chonk); falls back to chat."""
     api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         return {"summary": "", "risk": ""}
     user = f"Tool call title: {tc.get('title', '?')}\nInput: {json.dumps(tc.get('rawInput'))[:800]}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
+            headers = {"Authorization": f"Bearer {api_key}"}
+            agent_id = await _risk_agent_id(client, api_key)
+            if agent_id:
+                resp = await client.post(
+                    "https://api.mistral.ai/v1/conversations",
+                    headers=headers,
+                    json={
+                        "agent_id": agent_id,
+                        "inputs": [{"role": "user", "content": user}],
+                    },
+                )
+                if resp.status_code in (200, 201):
+                    try:
+                        out = json.loads(_conversation_text(resp.json()))
+                        return {
+                            "summary": out.get("summary", ""),
+                            "risk": out.get("risk", ""),
+                            "via": "agent",
+                        }
+                    except (ValueError, json.JSONDecodeError):
+                        pass
             resp = await client.post(
                 "https://api.mistral.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 json={
-                    "model": os.environ.get("BATON_RISK_MODEL", "mistral-small-latest"),
+                    "model": RISK_MODEL,
                     "messages": [
                         {"role": "system", "content": RISK_PROMPT},
                         {"role": "user", "content": user},
