@@ -332,6 +332,30 @@ class TestPermissionContract(WsCase):
         self.assertFalse(bws.watches({}))
         self.assertTrue(bws.watches({"sessionId": "s"}))
 
+    async def test_telegram_only_queues_permission_events(self):
+        bws = BatonWs()
+        bws.session_id = "s"
+        for update in (
+            {"sessionUpdate": "tool_call", "title": "Reading output from process"},
+            {"sessionUpdate": "agent_message_chunk", "content": {"text": "partial"}},
+            {"sessionUpdate": "current_mode_update", "currentModeId": "ask"},
+        ):
+            await bws._dispatch(
+                {
+                    "method": "session/update",
+                    "params": {"sessionId": "s", "update": update},
+                }
+            )
+        await bws._dispatch({"type": "auto_decided", "action": "denied"})
+        self.assertTrue(bws.queue.empty())
+        self.assertEqual(bws.mode, "ask")
+        for event in (
+            {"type": "agent_request", "requestId": "demo"},
+            {"type": "agent_resolved", "requestId": "demo"},
+        ):
+            await bws._dispatch(event)
+            self.assertEqual(bws.queue.get_nowait(), event)
+
     async def test_permission_expires_server_side(self):
         bridge = server.AcpBridge()
         bridge._send = AsyncMock()

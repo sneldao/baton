@@ -4,6 +4,9 @@ The bridge speaks the same WebSocket protocol as the phone client — it is
 literally just another baton device. Permission requests arrive as
 Telegram cards that edit in place and become the verdict stamp once the
 server resolves the request; inline buttons approve once or deny.
+The bridge is passive about decisions: no streamed text, tool
+activity, auto-decisions, or connection notices reach the chat —
+only permission cards and direct command replies.
 Exactly one operator is authorized: the private chat named by
 TELEGRAM_CHAT_ID. Every message and callback is checked against it, and
 buttons are bound to the chat/message the card was issued to.
@@ -108,10 +111,8 @@ class Telegram:
             reply_markup=markup or {"inline_keyboard": []},
         )
 
-    async def broadcast(
-        self, text: str, markup: dict | None = None, silent: bool = False
-    ) -> list:
-        r = await self.send(self.chat_id, text, markup, silent=silent)
+    async def broadcast(self, text: str, markup: dict | None = None) -> list:
+        r = await self.send(self.chat_id, text, markup)
         return [(self.chat_id, r.get("message_id"))] if r else []
 
     async def updates(self) -> list:
@@ -185,7 +186,22 @@ class BatonWs:
             self.cwd = p.get("cwd") or self.cwd
             log.info("bridge status: %s cwd=%s", p.get("state"), self.cwd)
             return
-        await self.queue.put(msg)
+        if msg.get("method") == "session/update":
+            params = msg.get("params") or {}
+            update = params.get("update") or {}
+            if (
+                self.watches(params)
+                and update.get("sessionUpdate") == "current_mode_update"
+            ):
+                self.mode = update.get("currentModeId")
+            return
+        if msg.get("type") in {
+            "permission_snapshot",
+            "agent_request",
+            "agent_resolved",
+            "error",
+        }:
+            await self.queue.put(msg)
 
     async def send(self, msg: dict):
         if self.ws is None:
@@ -238,8 +254,6 @@ async def main() -> None:
     pending: dict[int, dict] = {}
     prompt_task: asyncio.Task | None = None
     prompt_session: str | None = None
-    agent_text = ""
-    flush_task: asyncio.Task | None = None
 
     await tg.call(
         "setMyCommands",
@@ -252,26 +266,6 @@ async def main() -> None:
             {"command": "status", "description": "bridge + session state"},
         ],
     )
-
-    async def flush_agent_text():
-        nonlocal agent_text
-        if not agent_text.strip():
-            return
-        text, agent_text = agent_text.strip(), ""
-        await tg.broadcast("🤖 " + esc(text))
-
-    async def flush_later(delay: float):
-        try:
-            await asyncio.sleep(delay)
-            await flush_agent_text()
-        except asyncio.CancelledError:
-            pass
-
-    def schedule_flush():
-        nonlocal flush_task
-        if flush_task:
-            flush_task.cancel()
-        flush_task = asyncio.create_task(flush_later(2.5))
 
     def card_text(entry: dict, verdict: str | None = None) -> str:
         risk = f"\nmistral · {esc(entry['risk'])}\n" if entry.get("risk") else ""
@@ -349,7 +343,6 @@ async def main() -> None:
         return True
 
     async def on_baton(msg: dict):
-        nonlocal agent_text
         mtype = msg.get("type")
 
         if mtype == "permission_snapshot":
@@ -364,7 +357,6 @@ async def main() -> None:
         if mtype == "agent_request":
             if msg.get("method") != "session/request_permission":
                 return
-            await flush_agent_text()
             rid = msg["requestId"]
             entry = pending.get(rid)
             if entry and entry["msgs"]:
@@ -421,44 +413,6 @@ async def main() -> None:
                 )
             return
 
-        if mtype == "auto_decided":
-            title = ((msg.get("params") or {}).get("toolCall") or {}).get(
-                "title", "tool call"
-            )
-            if msg.get("action") == "denied":
-                note = f"⛔ <b>denied by rule</b> <code>{esc(str(msg.get('rule')))}</code>: {esc(title)}"
-            else:
-                note = f"⚡ <b>auto-approved</b>: {esc(title)}"
-                if msg.get("summary"):
-                    note += f"\nmistral · {esc(msg['summary'])}"
-            await flush_agent_text()
-            await tg.broadcast(note)
-            return
-
-        if mtype == "bridge_down":
-            await tg.broadcast("🔌 baton bridge disconnected — reconnecting…")
-            return
-
-        if msg.get("method") == "session/update":
-            p = msg.get("params") or {}
-            if not bws.watches(p):
-                return
-            u = p.get("update") or {}
-            kind = u.get("sessionUpdate")
-            if kind == "agent_message_chunk":
-                agent_text += (u.get("content") or {}).get("text", "")
-                schedule_flush()
-            elif kind == "tool_call":
-                await flush_agent_text()
-                await tg.broadcast(
-                    f"⚙ {esc(u.get('title') or u.get('kind') or 'tool call')}",
-                    silent=True,
-                )
-            elif kind == "current_mode_update":
-                bws.mode = u.get("currentModeId")
-            elif kind == "turn_end":
-                await flush_agent_text()
-
     async def typing_loop(cid: int, stop: asyncio.Event):
         """Keep the bot 'typing' while the agent works — it thinks with Vibe."""
         while not stop.is_set():
@@ -489,7 +443,6 @@ async def main() -> None:
                 timeout=None,
             )
             reason = (r or {}).get("stopReason") or "done"
-            await flush_agent_text()
             await tg.send(
                 cid,
                 f"✓ turn complete <code>{esc(str(reason))}</code>",
@@ -563,7 +516,6 @@ async def main() -> None:
                 except Exception as exc:
                     await tg.send(tg.chat_id, f"load failed: {exc}")
                     return
-                await flush_agent_text()
                 bws.session_id = sid
                 bws.mode = (r.get("modes") or {}).get("currentModeId")
                 await tg.send(
@@ -596,7 +548,6 @@ async def main() -> None:
                 await tg.send(cid, "Stop the current turn before changing sessions.")
                 return
             r = await bws.rpc("session/new", {"cwd": bws.cwd, "mcpServers": []})
-            await flush_agent_text()
             bws.session_id = r.get("sessionId")
             bws.mode = (r.get("modes") or {}).get("currentModeId")
             await tg.send(
@@ -684,12 +635,11 @@ async def main() -> None:
                 reader = asyncio.create_task(bws._reader(ws))
                 while True:
                     msg = await bws.queue.get()
-                    await on_baton(msg)
                     if msg.get("type") == "bridge_down":
                         break
+                    await on_baton(msg)
             except Exception as exc:
                 log.warning("bridge conn: %s — retry in %ss", exc, backoff)
-                await tg.broadcast("🔌 baton bridge unreachable — retrying…")
             finally:
                 if reader is not None:
                     reader.cancel()

@@ -72,7 +72,8 @@ vars. Vibe-side sessions use the auth and model configured in `~/.vibe`
 **Telegram client (paused).** `tools/telegram_bridge.py` turns one private
 chat into another baton device: permission requests arrive as messages with
 inline Allow once / Deny buttons, plus `/new`, `/sessions`, `/stop`,
-`/policy`, `/status` commands and agent replies. The integration is paused
+`/policy`, `/status` commands and direct replies. Routine tool activity
+and streaming output stay in the browser. The integration is paused
 pending the release gate in
 [docs/telegram-integration-review.md](docs/telegram-integration-review.md) —
 do not run it against real Telegram yet.
@@ -168,7 +169,7 @@ Vibe keeps running on the laptop the whole time: baton speaks
 stdio/JSON-RPC to `vibe-acp` locally and plain WebSocket+JSON outward, so
 execution stays local — only the *authority* moves. Note the privacy line is
 narrower than "nothing leaves the machine": Telegram receives card details
-and assistant output and carries prompts you type there. Browser voice audio
+and carries prompts you type there. Browser voice audio
 and tool-call inputs go to Mistral for transcription and risk summaries.
 Off-LAN, `./tunnel.sh` (cloudflared) gives an
 `https://` URL, which voice/face need anyway since browsers block

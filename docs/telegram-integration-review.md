@@ -37,7 +37,7 @@ Still pending:
 
 ## Privacy
 
-Vibe execution stays local to the laptop. Telegram receives card details and assistant output and carries prompts you type there. Mistral receives tool-call inputs for risk summaries. Treat both channels as shared.
+Vibe execution stays local to the laptop. Telegram receives card details and carries prompts you type there. Mistral receives tool-call inputs for risk summaries. Treat both channels as shared.
 
 ## Release gate
 
