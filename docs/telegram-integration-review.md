@@ -31,7 +31,7 @@ Implemented (core, offline-verified):
 
 Still pending:
 
-- End-to-end rehearsal: fake Telegram + fake ACP scenario tests beyond the boundary contract (including a rejected message payload), then one live pass on the real phone.
+- End-to-end rehearsal: fake Telegram + fake ACP scenario tests beyond the boundary contract (including a rejected message payload) are now checked in (`tests/test_telegram_e2e_fake.py`, run with `uv run --with pytest pytest tests/`); one live pass on the real phone is still pending.
 - Make Mistral summaries advisory for the demo — not model-authorized auto passes.
 - Replace the shared bearer with scoped, expiring pairing credentials before any public rollout.
 
