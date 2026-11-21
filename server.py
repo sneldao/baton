@@ -452,7 +452,9 @@ RISK_PROMPT = (
 
 
 RISK_AGENT_ID: str | None = None
-RISK_MODEL = os.environ.get("BATON_RISK_MODEL", "mistral-large-latest")
+# mistral-small: reasoning models burn tokens thinking on destructive inputs
+# (~6s vs ~0.5s) — latency matters on the approval hot path.
+RISK_MODEL = os.environ.get("BATON_RISK_MODEL", "mistral-small-latest")
 
 
 async def _risk_agent_id(client: httpx.AsyncClient, api_key: str) -> str | None:
@@ -489,6 +491,17 @@ def _conversation_text(payload: dict) -> str:
                 if part.get("type") in ("text", "output_text"):
                     return part.get("text", "")
     raise ValueError("no assistant text in conversation output")
+
+
+def _chat_text(message: dict) -> str:
+    """Extract answer text; reasoning models return content as typed parts."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    for part in content or []:
+        if part.get("type") == "text":
+            return part.get("text", "")
+    return ""
 
 
 async def risk_annotate(tc: dict) -> dict:
@@ -530,12 +543,12 @@ async def risk_annotate(tc: dict) -> dict:
                         {"role": "user", "content": user},
                     ],
                     "response_format": {"type": "json_object"},
-                    "max_tokens": 120,
+                    "max_tokens": 512,
                 },
             )
         if resp.status_code != 200:
             return {"summary": "", "risk": ""}
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = _chat_text(resp.json()["choices"][0]["message"])
         out = json.loads(content)
         return {"summary": out.get("summary", ""), "risk": out.get("risk", "")}
     except Exception:
