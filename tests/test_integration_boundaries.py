@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import server  # noqa: E402
-from telegram_bridge import BatonWs, Telegram  # noqa: E402
+from telegram_bridge import BatonWs, Telegram, permission_body  # noqa: E402
 
 PERMISSION_PARAMS = {
     "sessionId": "s",
@@ -54,6 +54,36 @@ def msg(chat_type, chat_id):
 
 def sender(user_id, is_bot=False):
     return {"id": user_id, "is_bot": is_bot}
+
+
+class TestPermissionBody(unittest.TestCase):
+    def test_shell_command_is_compact(self):
+        body = permission_body(
+            {
+                "title": "Approve file_system.bash",
+                "rawInput": {"command": "find . -name '*.py' | head"},
+            },
+            "70345fc1-abc",
+        )
+        self.assertIn("Approval needed", body)
+        self.assertIn("Shell command", body)
+        self.assertIn("find . -name", body)
+        self.assertIn("70345fc1", body)
+        self.assertNotIn("rawInput", body)
+        self.assertNotIn("{", body)
+
+    def test_file_write_shows_fields_not_json(self):
+        body = permission_body(
+            {
+                "title": "Write file",
+                "rawInput": {"path": "/tmp/x", "content": "hello"},
+            },
+            "s1",
+        )
+        self.assertIn("path: /tmp/x", body)
+        self.assertIn("content: hello", body)
+        self.assertNotIn("rawInput", body)
+        self.assertNotIn("{", body)
 
 
 class TestTelegramAccepts(unittest.TestCase):
@@ -355,6 +385,28 @@ class TestPermissionContract(WsCase):
         ):
             await bws._dispatch(event)
             self.assertEqual(bws.queue.get_nowait(), event)
+
+    async def test_telegram_resumes_without_reloading_history(self):
+        bws = BatonWs()
+        bws.cwd = "/workspace"
+        bws.session_id = "old"
+        bws.mode = "ask"
+        bws.rpc = AsyncMock(return_value={})
+        await bws.resume_session("current")
+        bws.rpc.assert_awaited_once_with(
+            "session/resume",
+            {"sessionId": "current", "cwd": "/workspace", "mcpServers": []},
+        )
+        self.assertEqual(bws.session_id, "current")
+        self.assertIsNone(bws.mode)
+        bws.mode = "ask"
+        await bws.resume_session("current")
+        self.assertEqual(bws.mode, "ask")
+        bws.rpc.side_effect = RuntimeError("Session is already open: another")
+        with self.assertRaises(RuntimeError):
+            await bws.resume_session("another")
+        self.assertEqual(bws.session_id, "current")
+        self.assertEqual(bws.mode, "ask")
 
     async def test_permission_expires_server_side(self):
         bridge = server.AcpBridge()

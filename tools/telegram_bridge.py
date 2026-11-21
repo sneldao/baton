@@ -54,6 +54,80 @@ def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def clip(text: str, limit: int = 1200) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def scalar_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def tool_detail(raw) -> tuple[str, str]:
+    if raw is None:
+        return "", ""
+    if isinstance(raw, dict):
+        command = next(
+            (
+                value.strip()
+                for key in ("command", "cmd", "shell", "script")
+                if isinstance((value := raw.get(key)), str) and value.strip()
+            ),
+            "",
+        )
+        if command:
+            return "Shell command", clip(command)
+        lines = []
+        size = 0
+        for key, value in raw.items():
+            if value in (None, "", [], {}):
+                continue
+            line = f"{key}: {scalar_text(value)}"
+            lines.append(line)
+            size += len(line) + 1
+            if size > 1200:
+                break
+        if lines:
+            return "", clip("\n".join(lines))
+        return ("", clip(json.dumps(raw, ensure_ascii=False))) if raw else ("", "")
+    if isinstance(raw, str):
+        return ("", clip(raw)) if raw.strip() else ("", "")
+    return "", clip(json.dumps(raw, ensure_ascii=False))
+
+
+def clean_title(title: str) -> str:
+    text = (title or "").strip()
+    for prefix in ("approve ", "allow ", "run "):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    return text or "tool call"
+
+
+def permission_body(tool_call: dict, session_id) -> str:
+    title = str(tool_call.get("title") or "")
+    low = title.lower()
+    label, detail = tool_detail(tool_call.get("rawInput"))
+    if not label:
+        label = (
+            "Shell command"
+            if "command" in low or "bash" in low or "shell" in low
+            else clean_title(title)
+        )
+    lines = ["⚠️ <b>Approval needed</b>", "", f"<b>{esc(label)}</b>"]
+    if detail:
+        lines.append(f"<pre>{esc(detail)}</pre>")
+    if session_id:
+        lines += ["", f"<code>{esc(str(session_id)[:8])}</code>"]
+    return "\n".join(lines)
+
+
 class Telegram:
     def __init__(self, client: httpx.AsyncClient, chat_id: int) -> None:
         self.http = client
@@ -223,6 +297,15 @@ class BatonWs:
         finally:
             self.rpc_pending.pop(rid, None)
 
+    async def resume_session(self, session_id: str) -> None:
+        await self.rpc(
+            "session/resume",
+            {"sessionId": session_id, "cwd": self.cwd, "mcpServers": []},
+        )
+        if self.session_id != session_id:
+            self.mode = None
+        self.session_id = session_id
+
     async def notify(self, method: str, params: dict | None = None):
         await self.send({"type": "notify", "method": method, "params": params or {}})
 
@@ -268,10 +351,11 @@ async def main() -> None:
     )
 
     def card_text(entry: dict, verdict: str | None = None) -> str:
-        risk = f"\nmistral · {esc(entry['risk'])}\n" if entry.get("risk") else ""
-        if verdict:
-            return entry["body"] + risk + f"\n<b>{verdict}</b>"
-        return entry["body"] + risk + "\nWaiting for your answer"
+        parts = [entry["body"]]
+        if entry.get("risk"):
+            parts.append(esc(entry["risk"]))
+        parts.append(f"<b>{verdict}</b>" if verdict else "<i>waiting</i>")
+        return "\n\n".join(parts)
 
     def card_keyboard(req_id: str, options: list) -> dict:
         row = [
@@ -364,14 +448,7 @@ async def main() -> None:
             tc = msg.get("params", {}).get("toolCall") or {}
             options = msg.get("params", {}).get("options") or []
             sid = msg.get("params", {}).get("sessionId")
-            title = tc.get("title") or "tool call"
-            raw = json.dumps(tc.get("rawInput") or {}, ensure_ascii=False)[:1200]
-            body = (
-                "⚠️ <b>VIBE NEEDS A DECISION</b>\n\n"
-                f"<b>{esc(title)}</b>\n"
-                f"<blockquote expandable>{esc(raw)}</blockquote>"
-                + (f"\n· session <code>{esc(str(sid)[:8])}</code>" if sid else "")
-            )
+            body = permission_body(tc, sid)
             markup = card_keyboard(rid, options)
             if not entry:
                 entry = {
@@ -391,11 +468,11 @@ async def main() -> None:
             if not pending.get(rid):
                 return
             label = {
-                "approved": "Approved",
-                "denied": "Denied",
-                "expired": "Expired",
-                "cancelled": "Cancelled",
-                "unavailable": "Unavailable",
+                "approved": "✅ Approved",
+                "denied": "❌ Denied",
+                "expired": "⌛ Expired",
+                "cancelled": "✖ Cancelled",
+                "unavailable": "⚠️ Unavailable",
             }.get(msg.get("decision"), "Closed")
             elapsed = msg.get("elapsedMs") or 0
             source = esc(str(msg.get("source") or "remote"))
@@ -509,15 +586,19 @@ async def main() -> None:
                     )
                     return
                 try:
-                    r = await bws.rpc(
-                        "session/load",
-                        {"sessionId": sid, "cwd": bws.cwd, "mcpServers": []},
-                    )
+                    await bws.resume_session(sid)
                 except Exception as exc:
-                    await tg.send(tg.chat_id, f"load failed: {exc}")
+                    if f"Session is already open: {sid}" in str(exc):
+                        await tg.send(
+                            tg.chat_id,
+                            "That session is open in another Vibe process. "
+                            "Close it there and try again, or use /new here.",
+                        )
+                    else:
+                        await tg.send(
+                            tg.chat_id, f"Couldn't resume: {esc(str(exc)[:200])}"
+                        )
                     return
-                bws.session_id = sid
-                bws.mode = (r.get("modes") or {}).get("currentModeId")
                 await tg.send(
                     tg.chat_id,
                     f"▶ resumed <code>{esc(sid[:8])}</code>"
