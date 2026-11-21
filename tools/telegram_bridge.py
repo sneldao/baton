@@ -1,9 +1,9 @@
 """baton <-> Telegram bridge: approve Vibe permission requests from one chat.
 
 The bridge speaks the same WebSocket protocol as the phone client — it is
-literally just another baton device. Permission requests arrive as live
-Telegram cards (the message itself is the race clock — it edits in place,
-then becomes the verdict stamp); inline buttons approve once or deny.
+literally just another baton device. Permission requests arrive as
+Telegram cards that edit in place and become the verdict stamp once the
+server resolves the request; inline buttons approve once or deny.
 Exactly one operator is authorized: the private chat named by
 TELEGRAM_CHAT_ID. Every message and callback is checked against it, and
 buttons are bound to the chat/message the card was issued to.
@@ -28,7 +28,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 
 import httpx
 import websockets
@@ -46,16 +45,10 @@ TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
 
 MAX_TG = 3900  # telegram text limit is 4096; leave margin
-TICK = 2.5  # card clock refresh, seconds — comfortably under edit limits
 
 
 def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def clock(t0: float) -> str:
-    el = time.monotonic() - t0
-    return f"{int(el // 60)}:{el % 60:04.1f}"
 
 
 class Telegram:
@@ -143,32 +136,42 @@ class BatonWs:
         self.clients = 0
         self.queue: asyncio.Queue = asyncio.Queue()
 
+    def watches(self, params: dict) -> bool:
+        return (
+            self.session_id is not None and params.get("sessionId") == self.session_id
+        )
+
     async def connect(self):
         ws = await websockets.connect(
-            f"{BATON_WS}?token={BATON_TOKEN}", max_size=16 * 1024 * 1024
+            f"{BATON_WS}?token={BATON_TOKEN}&client=telegram",
+            max_size=16 * 1024 * 1024,
         )
         self.ws = ws
-        asyncio.create_task(self._reader())
         return ws
 
-    async def _reader(self):
+    async def _reader(self, ws):
         try:
-            async for raw in self.ws:
+            async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
                 await self._dispatch(msg)
         finally:
+            if self.ws is ws:
+                self.ws = None
+                self.clients = 0
+                for fut in self.rpc_pending.values():
+                    if not fut.done():
+                        fut.set_exception(RuntimeError("bridge disconnected"))
+                self.rpc_pending.clear()
             await self.queue.put({"type": "bridge_down"})
-            for fut in self.rpc_pending.values():
-                if not fut.done():
-                    fut.set_exception(RuntimeError("bridge disconnected"))
-            self.rpc_pending.clear()
 
     async def _dispatch(self, msg: dict):
-        if msg.get("id") is not None and msg["id"] in self.rpc_pending:
-            fut = self.rpc_pending.pop(msg["id"])
+        if msg.get("id") is not None and ("result" in msg or "error" in msg):
+            fut = self.rpc_pending.pop(msg["id"], None)
+            if fut is None or fut.done():
+                return
             if "error" in msg:
                 fut.set_exception(RuntimeError(str(msg["error"])))
             else:
@@ -182,30 +185,32 @@ class BatonWs:
             self.cwd = p.get("cwd") or self.cwd
             log.info("bridge status: %s cwd=%s", p.get("state"), self.cwd)
             return
-        # learn the active session id from stream traffic
-        sid = (msg.get("params") or {}).get("sessionId")
-        if sid:
-            self.session_id = sid
         await self.queue.put(msg)
 
     async def send(self, msg: dict):
-        if self.ws:
-            await self.ws.send(json.dumps(msg))
+        if self.ws is None:
+            raise RuntimeError("bridge disconnected")
+        await self.ws.send(json.dumps(msg))
 
-    async def rpc(self, method: str, params: dict | None = None, timeout: float = 60):
+    async def rpc(
+        self, method: str, params: dict | None = None, timeout: float | None = 60
+    ):
         self.next_id += 1
         rid = self.next_id
         fut = asyncio.get_event_loop().create_future()
         self.rpc_pending[rid] = fut
-        await self.send(
-            {"type": "rpc", "id": rid, "method": method, "params": params or {}}
-        )
-        return await asyncio.wait_for(fut, timeout=timeout)
+        try:
+            await self.send(
+                {"type": "rpc", "id": rid, "method": method, "params": params or {}}
+            )
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            self.rpc_pending.pop(rid, None)
 
     async def notify(self, method: str, params: dict | None = None):
         await self.send({"type": "notify", "method": method, "params": params or {}})
 
-    async def answer(self, request_id: int, result: dict):
+    async def answer(self, request_id: str, result: dict):
         await self.send(
             {"type": "agent_response", "requestId": request_id, "result": result}
         )
@@ -231,6 +236,8 @@ async def main() -> None:
 
     # requestId -> pending card state
     pending: dict[int, dict] = {}
+    prompt_task: asyncio.Task | None = None
+    prompt_session: str | None = None
     agent_text = ""
     flush_task: asyncio.Task | None = None
 
@@ -270,13 +277,9 @@ async def main() -> None:
         risk = f"\nmistral · {esc(entry['risk'])}\n" if entry.get("risk") else ""
         if verdict:
             return entry["body"] + risk + f"\n<b>{verdict}</b>"
-        return (
-            entry["body"]
-            + risk
-            + f"\n⏱ <code>{clock(entry['t0'])}</code> — waiting on you"
-        )
+        return entry["body"] + risk + "\nWaiting for your answer"
 
-    def card_keyboard(req_id: int, options: list) -> dict:
+    def card_keyboard(req_id: str, options: list) -> dict:
         row = [
             {"text": "Allow once", "callback_data": f"a:{req_id}:{i}"}
             for i, opt in enumerate(options)
@@ -285,17 +288,11 @@ async def main() -> None:
         row.append({"text": "Deny", "callback_data": f"d:{req_id}"})
         return {"inline_keyboard": [row]}
 
-    async def tick_card(req_id: int):
-        """The card is the race clock — edit in place until resolved."""
-        entry = pending.get(req_id)
-        while entry and not entry.get("answered"):
-            await asyncio.sleep(TICK)
-            for cid, mid in entry["msgs"]:
-                if mid:
-                    await tg.edit(cid, mid, card_text(entry), entry["markup"])
-
-    async def annotate(req_id: int, tool_call: dict):
+    async def annotate(req_id: str, tool_call: dict):
         """Fetch Mistral's risk verdict and edit it into the card."""
+        entry = pending.get(req_id)
+        if not entry:
+            return
         try:
             r = await tg.http.post(
                 f"{BATON_HTTP}/api/summarize",
@@ -306,29 +303,30 @@ async def main() -> None:
             data = r.json()
         except Exception:
             return
-        entry = pending.get(req_id)
-        if not entry or entry.get("answered"):
-            return
         summary, risk = data.get("summary") or "", data.get("risk") or ""
         if not summary and not risk:
             return
         icon = {"low": "🟢", "medium": "🟠", "high": "🔴"}.get(risk, "⚖")
-        entry["risk"] = f"{icon} {summary}" if summary else f"{icon} {risk} risk"
-        for cid, mid in entry["msgs"]:
-            if mid:
-                await tg.edit(cid, mid, card_text(entry), entry["markup"])
+        async with entry["lock"]:
+            if pending.get(req_id) is not entry or entry.get("answered"):
+                return
+            entry["risk"] = f"{icon} {summary}" if summary else f"{icon} {risk} risk"
+            for cid, mid in entry["msgs"]:
+                if mid:
+                    await tg.edit(cid, mid, card_text(entry), entry["markup"])
 
-    async def stamp(req_id: int, verdict: str):
+    async def stamp(req_id: str, verdict: str):
         """The card becomes the receipt — buttons off, verdict on."""
         entry = pending.pop(req_id, None)
         if not entry:
             return
         entry["answered"] = True
-        for cid, mid in entry["msgs"]:
-            if mid:
-                await tg.edit(cid, mid, card_text(entry, verdict))
+        async with entry["lock"]:
+            for cid, mid in entry["msgs"]:
+                if mid:
+                    await tg.edit(cid, mid, card_text(entry, verdict))
 
-    async def answer(req_id: int, option_id, via: str):
+    async def answer(req_id: str, option_id, via: str):
         entry = pending.get(req_id)
         if not entry or entry.get("answered"):
             return False
@@ -338,55 +336,89 @@ async def main() -> None:
             if option_id
             else {"outcome": {"outcome": "cancelled"}}
         )
-        await bws.answer(req_id, result)
+        try:
+            await bws.answer(req_id, result)
+        except Exception:
+            if pending.get(req_id) is entry:
+                entry["answered"] = None
+                await tg.send(
+                    tg.chat_id,
+                    "Couldn't reach baton — tap again to retry.",
+                )
+            return False
         return True
 
     async def on_baton(msg: dict):
         nonlocal agent_text
         mtype = msg.get("type")
 
+        if mtype == "permission_snapshot":
+            live = set(msg.get("requestIds") or [])
+            for rid in list(pending):
+                if rid in live:
+                    pending[rid]["answered"] = None
+                else:
+                    await stamp(rid, "Closed while disconnected")
+            return
+
         if mtype == "agent_request":
             if msg.get("method") != "session/request_permission":
-                await bws.send(
-                    {
-                        "type": "agent_response",
-                        "requestId": msg["requestId"],
-                        "error": {
-                            "code": -32601,
-                            "message": "unsupported by telegram bridge",
-                        },
-                    }
-                )
                 return
             await flush_agent_text()
             rid = msg["requestId"]
+            entry = pending.get(rid)
+            if entry and entry["msgs"]:
+                return  # card already issued for this request
             tc = msg.get("params", {}).get("toolCall") or {}
             options = msg.get("params", {}).get("options") or []
+            sid = msg.get("params", {}).get("sessionId")
             title = tc.get("title") or "tool call"
             raw = json.dumps(tc.get("rawInput") or {}, ensure_ascii=False)[:1200]
             body = (
                 "⚠️ <b>VIBE NEEDS A DECISION</b>\n\n"
                 f"<b>{esc(title)}</b>\n"
                 f"<blockquote expandable>{esc(raw)}</blockquote>"
+                + (f"\n· session <code>{esc(str(sid)[:8])}</code>" if sid else "")
             )
             markup = card_keyboard(rid, options)
-            entry = {
-                "options": options,
-                "t0": time.monotonic(),
-                "body": body,
-                "markup": markup,
-                "msgs": [],
-            }
-            pending[rid] = entry
+            if not entry:
+                entry = {
+                    "options": options,
+                    "body": body,
+                    "markup": markup,
+                    "msgs": [],
+                    "lock": asyncio.Lock(),
+                }
+                pending[rid] = entry
             entry["msgs"] = await tg.broadcast(card_text(entry), markup)
-            asyncio.create_task(tick_card(rid))
             asyncio.create_task(annotate(rid, tc))
             return
 
         if mtype == "agent_resolved":
             rid = msg.get("requestId")
-            if pending.get(rid):
-                await stamp(rid, "Closed by baton")
+            if not pending.get(rid):
+                return
+            label = {
+                "approved": "Approved",
+                "denied": "Denied",
+                "expired": "Expired",
+                "cancelled": "Cancelled",
+                "unavailable": "Unavailable",
+            }.get(msg.get("decision"), "Closed")
+            elapsed = msg.get("elapsedMs") or 0
+            source = esc(str(msg.get("source") or "remote"))
+            await stamp(rid, f"{label} · {elapsed / 1000:.1f}s · {source}")
+            return
+
+        if mtype == "error":
+            rid = msg.get("requestId")
+            entry = pending.get(rid)
+            if entry:
+                entry["answered"] = None
+                await tg.send(
+                    tg.chat_id,
+                    "Answer not accepted; this card may already be closed.",
+                )
             return
 
         if mtype == "auto_decided":
@@ -408,7 +440,10 @@ async def main() -> None:
             return
 
         if msg.get("method") == "session/update":
-            u = (msg.get("params") or {}).get("update") or {}
+            p = msg.get("params") or {}
+            if not bws.watches(p):
+                return
+            u = p.get("update") or {}
             kind = u.get("sessionUpdate")
             if kind == "agent_message_chunk":
                 agent_text += (u.get("content") or {}).get("text", "")
@@ -434,24 +469,24 @@ async def main() -> None:
                 pass
 
     async def run_prompt(cid: int, text: str, reply_to: int | None):
-        if not bws.session_id:
-            try:
-                r = await bws.rpc("session/new", {"cwd": bws.cwd, "mcpServers": []})
-            except Exception as exc:
-                await tg.send(cid, f"couldn't start a session: {exc}")
-                return
-            bws.session_id = r.get("sessionId")
-            bws.mode = (r.get("modes") or {}).get("currentModeId")
+        session_id = bws.session_id
+        if not session_id:
+            await tg.send(
+                cid,
+                "Choose a session with /sessions or create one with /new first.",
+                reply_to=reply_to,
+            )
+            return
         stop = asyncio.Event()
         typing = asyncio.create_task(typing_loop(cid, stop))
         try:
             r = await bws.rpc(
                 "session/prompt",
                 {
-                    "sessionId": bws.session_id,
+                    "sessionId": session_id,
                     "prompt": [{"type": "text", "text": text}],
                 },
-                timeout=300,
+                timeout=None,
             )
             reason = (r or {}).get("stopReason") or "done"
             await flush_agent_text()
@@ -466,12 +501,17 @@ async def main() -> None:
                 cid, "turn still running — cards will land here if it needs you"
             )
         except Exception as exc:
-            await tg.send(cid, f"prompt failed: {esc(str(exc))[:200]}")
+            await tg.send(
+                cid,
+                f"prompt failed: {esc(str(exc))[:160]}\n"
+                "if the bridge disconnected, the turn may still be running",
+            )
         finally:
             stop.set()
             typing.cancel()
 
     async def on_telegram(upd: dict):
+        nonlocal prompt_task, prompt_session
         if "callback_query" in upd:
             cb = upd["callback_query"]
             message = cb.get("message") or {}
@@ -481,10 +521,7 @@ async def main() -> None:
             await tg.call("answerCallbackQuery", callback_query_id=cb["id"])
             act, _, rest = data.partition(":")
             if act == "d":
-                try:
-                    rid = int(rest)
-                except ValueError:
-                    return
+                rid = rest
                 entry = pending.get(rid)
                 if (
                     not entry
@@ -493,9 +530,9 @@ async def main() -> None:
                     return
                 await answer(rid, None, "tap")
             elif act == "a":
-                rid_s, _, idx_s = rest.partition(":")
+                rid, _, idx_s = rest.partition(":")
                 try:
-                    rid, idx = int(rid_s), int(idx_s)
+                    idx = int(idx_s)
                 except ValueError:
                     return
                 entry = pending.get(rid)
@@ -512,6 +549,12 @@ async def main() -> None:
                 await answer(rid, opt["optionId"], "tap")
             elif act == "l":
                 sid = rest
+                if prompt_task is not None and not prompt_task.done():
+                    await tg.send(
+                        tg.chat_id,
+                        "Stop the current turn before changing sessions.",
+                    )
+                    return
                 try:
                     r = await bws.rpc(
                         "session/load",
@@ -520,6 +563,7 @@ async def main() -> None:
                 except Exception as exc:
                     await tg.send(tg.chat_id, f"load failed: {exc}")
                     return
+                await flush_agent_text()
                 bws.session_id = sid
                 bws.mode = (r.get("modes") or {}).get("currentModeId")
                 await tg.send(
@@ -548,7 +592,11 @@ async def main() -> None:
                 "Send any other text as a prompt for the current session.",
             )
         elif cmd == "/new":
+            if prompt_task is not None and not prompt_task.done():
+                await tg.send(cid, "Stop the current turn before changing sessions.")
+                return
             r = await bws.rpc("session/new", {"cwd": bws.cwd, "mcpServers": []})
+            await flush_agent_text()
             bws.session_id = r.get("sessionId")
             bws.mode = (r.get("modes") or {}).get("currentModeId")
             await tg.send(
@@ -576,9 +624,16 @@ async def main() -> None:
                 cid, "📂 <b>tap to resume:</b>", markup={"inline_keyboard": rows}
             )
         elif cmd == "/stop":
-            if bws.session_id:
-                await bws.notify("session/cancel", {"sessionId": bws.session_id})
+            target = (
+                prompt_session
+                if prompt_task is not None and not prompt_task.done()
+                else bws.session_id
+            )
+            if target:
+                await bws.notify("session/cancel", {"sessionId": target})
                 await tg.send(cid, "✋ cancel sent")
+            else:
+                await tg.send(cid, "no session selected")
         elif cmd == "/status":
             await tg.send(
                 cid,
@@ -594,7 +649,16 @@ async def main() -> None:
             )
             await tg.send(cid, f"<code>{esc(json.dumps(r.json(), indent=1))}</code>")
         elif not cmd.startswith("/"):
-            asyncio.create_task(run_prompt(cid, text, m.get("message_id")))
+            if prompt_task is not None and not prompt_task.done():
+                await tg.send(
+                    cid,
+                    "A turn is already active. Use /stop to cancel it first.",
+                )
+            else:
+                prompt_session = bws.session_id
+                prompt_task = asyncio.create_task(
+                    run_prompt(cid, text, m.get("message_id"))
+                )
         else:
             await tg.send(cid, "Unknown command. Use /start for help.")
 
@@ -611,18 +675,36 @@ async def main() -> None:
     async def ws_loop():
         backoff = 1
         while True:
+            reader = None
+            ws = None
             try:
-                await bws.connect()
+                ws = await bws.connect()
                 backoff = 1
                 log.info("connected to %s", BATON_WS)
+                reader = asyncio.create_task(bws._reader(ws))
                 while True:
                     msg = await bws.queue.get()
                     await on_baton(msg)
+                    if msg.get("type") == "bridge_down":
+                        break
             except Exception as exc:
                 log.warning("bridge conn: %s — retry in %ss", exc, backoff)
                 await tg.broadcast("🔌 baton bridge unreachable — retrying…")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+            finally:
+                if reader is not None:
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
+                if ws is not None:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                if bws.ws is ws:
+                    bws.ws = None
+                # fresh queue per connection: drop stale buffered frames
+                bws.queue = asyncio.Queue()
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
     await asyncio.gather(tg_loop(), ws_loop())
 

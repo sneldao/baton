@@ -72,15 +72,20 @@ class AcpBridge:
         self.proc: asyncio.subprocess.Process | None = None
         self.next_id = 0
         self.pending: dict[int, asyncio.Future] = {}
-        self.pending_agent_requests: dict[int, asyncio.Task] = {}
+        # public request id -> (ACP id, start monotonic, expiry timer)
+        self.pending_agent_requests: dict[
+            str, tuple[int | str, float, asyncio.Task]
+        ] = {}
         # Outstanding agent->client requests, replayed to clients that connect
         # or reconnect so a phone refresh never loses a pending approval.
-        self.outstanding_requests: dict[int, dict] = {}
+        # Keyed by the public opaque id — ACP ids never reach the wire.
+        self.outstanding_requests: dict[str, dict] = {}
         self.clients: set[web.WebSocketResponse] = set()
         self.initialized = False
         self.auth_methods: list = []
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self.broadcast_lock = asyncio.Lock()
 
     async def start(self) -> None:
         cmd = shlex.split(VIBE_ACP_CMD)
@@ -126,16 +131,24 @@ class AcpBridge:
 
     async def _read_stdout(self) -> None:
         assert self.proc and self.proc.stdout
-        async for line in self.proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                log.warning("non-JSON from agent: %r", line[:200])
-                continue
-            await self._dispatch(msg)
+        try:
+            async for line in self.proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    log.warning("non-JSON from agent: %r", line[:200])
+                    continue
+                await self._dispatch(msg)
+        finally:
+            # synchronous only: fail local RPC futures; the agent may still be
+            # running turns, so don't announce anything to clients here
+            self.initialized = False
+            for fut in self.pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("ACP connection closed"))
 
     async def _drain_stderr(self) -> None:
         assert self.proc and self.proc.stderr
@@ -159,48 +172,90 @@ class AcpBridge:
         await self.broadcast(msg)
 
     async def _handle_agent_request(self, msg: dict) -> None:
-        req_id = msg["id"]
+        acp_id = msg["id"]
         method = msg["method"]
-        log.info("agent request %s (id=%s)", method, req_id)
+        log.info("agent request %s (id=%s)", method, acp_id)
 
-        async def timeout_answer() -> None:
-            await asyncio.sleep(AGENT_REQUEST_TIMEOUT)
-            if req_id in self.pending_agent_requests:
-                self.pending_agent_requests.pop(req_id)
-                self.outstanding_requests.pop(req_id, None)
-                await self._send(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "error": {"code": -32601, "message": "client did not answer"},
-                    }
-                )
-                await self.broadcast({"type": "agent_resolved", "requestId": req_id})
+        if method != "session/request_permission":
+            await self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": acp_id,
+                    "error": {
+                        "code": -32601,
+                        "message": "unsupported ACP client request",
+                    },
+                }
+            )
+            return
 
-        self.pending_agent_requests[req_id] = asyncio.create_task(timeout_answer())
-        forwarded = {
-            "type": "agent_request",
-            "requestId": req_id,
-            "method": method,
-            "params": msg.get("params", {}),
-        }
-        self.outstanding_requests[req_id] = forwarded
-        # trust dial: low-risk tool calls may auto-approve; one-way doors never do
+        # trust dial: policy decides before anything reaches a human card;
+        # low-risk tool calls may auto-approve, one-way doors never do
         decision, meta = await self._policy_decide(method, msg.get("params", {}))
         if decision is not None:
-            await self._resolve(req_id)
-            await self._send({"jsonrpc": "2.0", "id": req_id, "result": decision})
+            await self._send({"jsonrpc": "2.0", "id": acp_id, "result": decision})
             await self.broadcast(
                 {
                     "type": "auto_decided",
-                    "requestId": req_id,
+                    "requestId": secrets.token_hex(12),
                     "method": method,
                     "params": msg.get("params", {}),
                     **meta,
                 }
             )
             return
+
+        request_id = secrets.token_hex(12)
+        started_at = asyncio.get_running_loop().time()
+        timer = asyncio.create_task(self._expire_permission(request_id))
+        self.pending_agent_requests[request_id] = (acp_id, started_at, timer)
+        forwarded = {
+            "type": "agent_request",
+            "requestId": request_id,
+            "method": method,
+            "params": msg.get("params", {}),
+        }
+        self.outstanding_requests[request_id] = forwarded
         await self.broadcast(forwarded)
+
+    async def _expire_permission(self, request_id: str) -> None:
+        await asyncio.sleep(AGENT_REQUEST_TIMEOUT)
+        await self._finish_permission(
+            request_id,
+            {"outcome": {"outcome": "cancelled"}},
+            "expired",
+            "server",
+        )
+
+    async def _finish_permission(
+        self, request_id: str, result: dict, decision: str, source: str
+    ) -> bool:
+        entry = self.pending_agent_requests.pop(request_id, None)
+        if entry is None:
+            return False
+        self.outstanding_requests.pop(request_id, None)
+        acp_id, started_at, timer = entry
+        if timer is not asyncio.current_task():
+            timer.cancel()
+        option_id = result["outcome"].get("optionId")
+        try:
+            await self._send({"jsonrpc": "2.0", "id": acp_id, "result": result})
+        except Exception:
+            log.exception("failed to deliver answer for request %s", request_id)
+            decision = "unavailable"
+        await self.broadcast(
+            {
+                "type": "agent_resolved",
+                "requestId": request_id,
+                "decision": decision,
+                "source": source,
+                "optionId": option_id,
+                "elapsedMs": round(
+                    (asyncio.get_running_loop().time() - started_at) * 1000
+                ),
+            }
+        )
+        return True
 
     async def _policy_decide(
         self, method: str, params: dict
@@ -263,37 +318,66 @@ class AcpBridge:
             "risk": "low",
         }
 
-    async def _resolve(self, req_id: int) -> asyncio.Task | None:
-        self.outstanding_requests.pop(req_id, None)
-        task = self.pending_agent_requests.pop(req_id, None)
-        if task is None:
-            return None
-        task.cancel()
-        await self.broadcast({"type": "agent_resolved", "requestId": req_id})
-        return task
+    async def answer_agent_request(
+        self, request_id: str, result: dict, source: str
+    ) -> bool:
+        """Validate a client answer against the offered options, then resolve.
 
-    async def answer_agent_request(self, req_id: int, result: dict) -> bool:
-        if await self._resolve(req_id) is None:
+        Unknown or malformed answers leave the request pending.
+        """
+        if not isinstance(request_id, str):
             return False
-        await self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
-        return True
-
-    async def error_agent_request(self, req_id: int, error: dict | str) -> bool:
-        if await self._resolve(req_id) is None:
+        forwarded = self.outstanding_requests.get(request_id)
+        if forwarded is None:
             return False
-        err = error if isinstance(error, dict) else {"code": -32601, "message": error}
-        await self._send({"jsonrpc": "2.0", "id": req_id, "error": err})
-        return True
+        outcome = result.get("outcome") if isinstance(result, dict) else None
+        if not isinstance(outcome, dict):
+            return False
+        kind = outcome.get("outcome")
+        if kind == "cancelled":
+            return await self._finish_permission(
+                request_id,
+                {"outcome": {"outcome": "cancelled"}},
+                "denied",
+                source,
+            )
+        if kind != "selected":
+            return False
+        option_id = outcome.get("optionId")
+        if not isinstance(option_id, str) or not option_id:
+            return False
+        options = (forwarded.get("params") or {}).get("options") or []
+        opt = next(
+            (o for o in options if (o.get("optionId") or o.get("id")) == option_id),
+            None,
+        )
+        if opt is None:
+            return False
+        opt_kind = str(opt.get("kind") or "")
+        if not (opt_kind.startswith("allow") or opt_kind.startswith("reject")):
+            return False
+        decision = "approved" if opt_kind.startswith("allow") else "denied"
+        return await self._finish_permission(
+            request_id,
+            {"outcome": {"outcome": "selected", "optionId": option_id}},
+            decision,
+            source,
+        )
 
     async def call(self, method: str, params: dict | None = None) -> dict:
         self.next_id += 1
         rid = self.next_id
         fut = asyncio.get_event_loop().create_future()
         self.pending[rid] = fut
-        await self._send(
-            {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
-        )
-        return await asyncio.wait_for(fut, timeout=120)
+        try:
+            await self._send(
+                {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
+            )
+            return await asyncio.wait_for(
+                fut, timeout=None if method == "session/prompt" else 120
+            )
+        finally:
+            self.pending.pop(rid, None)
 
     async def notify(self, method: str, params: dict | None = None) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -304,14 +388,15 @@ class AcpBridge:
         await self.proc.stdin.drain()
 
     async def broadcast(self, msg: dict) -> None:
-        dead = []
-        for ws in self.clients:
-            try:
-                await ws.send_json(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.clients.discard(ws)
+        async with self.broadcast_lock:
+            dead = []
+            for ws in tuple(self.clients):
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                self.clients.discard(ws)
 
     async def broadcast_client_count(self) -> None:
         await self.broadcast({"type": "bridge/clients", "count": len(self.clients)})
@@ -339,27 +424,48 @@ async def index(request: web.Request) -> web.Response:
     return web.FileResponse(STATIC / "index.html")
 
 
+async def _safe_send(ws: web.WebSocketResponse, msg: dict) -> None:
+    try:
+        await ws.send_json(msg)
+    except (ConnectionError, RuntimeError):
+        pass
+
+
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     if not check_token(request):
         return web.Response(status=401, text="bad token")
+    source = request.query.get("client", "remote")
+    if source not in {"telegram", "browser"}:
+        source = "remote"
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     bridge.clients.add(ws)
-    await bridge.broadcast_client_count()
-    await ws.send_json(
-        {
-            "method": "bridge/status",
-            "params": {
-                "state": "ready" if bridge.initialized else "starting",
-                "authMethods": bridge.auth_methods,
-                "cwd": os.getcwd(),
-            },
-        }
-    )
-    # Replay requests still awaiting an answer (covers refresh/reconnect).
-    for req in bridge.outstanding_requests.values():
-        await ws.send_json(req)
+    # Snapshot synchronously: the snapshot frame plus any replayed request
+    # still present in outstanding_requests is a consistent view.
+    requests = list(bridge.outstanding_requests.values())
+    prompts: set[asyncio.Task] = set()
     try:
+        await ws.send_json(
+            {
+                "type": "permission_snapshot",
+                "requestIds": [r["requestId"] for r in requests],
+            }
+        )
+        await bridge.broadcast_client_count()
+        await ws.send_json(
+            {
+                "method": "bridge/status",
+                "params": {
+                    "state": "ready" if bridge.initialized else "starting",
+                    "authMethods": bridge.auth_methods,
+                    "cwd": os.getcwd(),
+                },
+            }
+        )
+        # Replay requests still awaiting an answer (covers refresh/reconnect).
+        for req in requests:
+            if req["requestId"] in bridge.outstanding_requests:
+                await ws.send_json(req)
         async for raw in ws:
             if raw.type != web.WSMsgType.TEXT:
                 continue
@@ -367,34 +473,68 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 msg = json.loads(raw.data)
             except json.JSONDecodeError:
                 continue
-            await handle_client_msg(ws, msg)
+            if not isinstance(msg, dict):
+                continue
+            # prompts run concurrently so control messages (answers,
+            # cancels) are processed while a turn is in flight
+            if (
+                msg.get("type", "rpc") == "rpc"
+                and msg.get("method") == "session/prompt"
+            ):
+                task = asyncio.create_task(handle_client_msg(ws, msg, source))
+                prompts.add(task)
+                task.add_done_callback(prompts.discard)
+            else:
+                await handle_client_msg(ws, msg, source)
     finally:
+        for task in prompts:
+            task.cancel()
+        if prompts:
+            await asyncio.gather(*prompts, return_exceptions=True)
         bridge.clients.discard(ws)
         await bridge.broadcast_client_count()
     return ws
 
 
-async def handle_client_msg(ws: web.WebSocketResponse, msg: dict) -> None:
+async def handle_client_msg(
+    ws: web.WebSocketResponse, msg: dict, source: str = "remote"
+) -> None:
     mtype = msg.get("type", "rpc")
     try:
         if mtype == "rpc":  # client -> agent JSON-RPC
             result = await bridge.call(msg["method"], msg.get("params"))
-            await ws.send_json({"id": msg.get("id"), "result": result})
+            await _safe_send(ws, {"id": msg.get("id"), "result": result})
         elif mtype == "notify":  # client -> agent notification
             await bridge.notify(msg["method"], msg.get("params"))
+            if msg.get("method") == "session/cancel":
+                sid = (msg.get("params") or {}).get("sessionId")
+                if isinstance(sid, str) and sid:
+                    for rid, req in list(bridge.outstanding_requests.items()):
+                        if (req.get("params") or {}).get("sessionId") == sid:
+                            await bridge._finish_permission(
+                                rid,
+                                {"outcome": {"outcome": "cancelled"}},
+                                "cancelled",
+                                source,
+                            )
         elif mtype == "agent_response":  # answer to agent -> client request
-            if "error" in msg:
-                ok = await bridge.error_agent_request(msg["requestId"], msg["error"])
-            else:
+            ok = False
+            if "error" not in msg:
                 ok = await bridge.answer_agent_request(
-                    msg["requestId"], msg.get("result", {})
+                    msg.get("requestId"), msg.get("result"), source
                 )
             if not ok:
-                await ws.send_json(
-                    {"type": "error", "message": "request already resolved"}
+                await _safe_send(
+                    ws,
+                    {
+                        "type": "error",
+                        "requestId": msg.get("requestId"),
+                        "message": "Permission answer rejected: stale or invalid",
+                    },
                 )
     except Exception as exc:
-        await ws.send_json({"id": msg.get("id"), "error": {"message": str(exc)}})
+        if not ws.closed:
+            await _safe_send(ws, {"id": msg.get("id"), "error": {"message": str(exc)}})
 
 
 async def voice(request: web.Request) -> web.Response:

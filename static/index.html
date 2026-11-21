@@ -234,14 +234,16 @@ if (qs.has('calm')) document.body.classList.add('calm');
 const $ = id => document.getElementById(id);
 let ws, sessionId = null, cwd = null, curAgentEl = null, nextId = 0;
 let lastAgentText = '', narrationOn = false, turnActive = false, autoLow = false;
+let turnSessionId = null;
 const rpcPending = {}, toolEls = {};
 let permRequest = null, mediaRec = null, chunks = [];
+const pendingPermissions = new Map(); let permSubmitting = false;
 let permT0 = 0, permTimer = null;
 
 function toast(t, ms=2800){ const e=$('toast'); e.textContent=t; e.style.display='block'; clearTimeout(e._t); e._t=setTimeout(()=>e.style.display='none',ms); }
 
 function connect(){
-  ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${token}`);
+  ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${token}&client=browser`);
   ws.onopen = () => { $('dot').className='on';
     fetch('/api/policy?token='+token).then(r=>r.json()).then(p=>{
       autoLow = p.auto_low;
@@ -249,7 +251,18 @@ function connect(){
       $('autoBtn').style.color = autoLow ? 'var(--acc)' : '';
     }).catch(()=>{});
   };
-  ws.onclose = () => { $('dot').className=''; $('status').textContent='reconnecting…'; setTimeout(connect, 2000); };
+  ws.onclose = () => {
+    $('dot').className=''; $('status').textContent='reconnecting…';
+    Object.keys(rpcPending).forEach(id=>{
+      rpcPending[id].rej(new Error('bridge disconnected'));
+      delete rpcPending[id];
+    });
+    pendingPermissions.clear();
+    if (permRequest){ $('perm').style.display='none'; permRequest=null; }
+    permSubmitting=false;
+    stopClock(); setAmbient();
+    setTimeout(connect, 2000);
+  };
   ws.onmessage = ev => onMsg(JSON.parse(ev.data));
 }
 
@@ -337,16 +350,46 @@ function onMsg(m){
     }
     return;
   }
-  if (m.type === 'agent_request') return onAgentRequest(m);
-  if (m.type === 'agent_resolved') {
-    if (permRequest && permRequest.requestId === m.requestId) {
-      const s = stopClock();
-      $('perm').style.display='none'; permRequest=null; setAmbient();
-      toast('answered on another device · ' + s.toFixed(1) + 's');
+  if (m.type === 'permission_snapshot') {
+    const live = new Set(m.requestIds || []);
+    [...pendingPermissions.keys()].forEach(id=>{ if(!live.has(id)) pendingPermissions.delete(id); });
+    if (permRequest && !live.has(permRequest.requestId)){
+      $('perm').style.display='none'; permRequest=null; permSubmitting=false;
+      stopClock(); setAmbient();
+    }
+    if (!permRequest){
+      const next = pendingPermissions.values().next().value;
+      if (next) showPerm(next);
     }
     return;
   }
-  if (m.type === 'error') return toast(m.message);
+  if (m.type === 'agent_request') return onAgentRequest(m);
+  if (m.type === 'agent_resolved') {
+    const known = pendingPermissions.get(m.requestId);
+    pendingPermissions.delete(m.requestId);
+    if (known){
+      const labels = {approved:'Approved', denied:'Denied', expired:'Expired',
+        cancelled:'Cancelled', unavailable:'Unavailable'};
+      const label = labels[m.decision] || 'Closed';
+      const secs = ((m.elapsedMs||0)/1000).toFixed(1);
+      tick(`${label} · ${secs}s · ${m.source||'remote'}`);
+      stamp(`${label} · ${secs}s · ${m.source||'remote'}`, m.decision==='approved');
+    }
+    if (permRequest && permRequest.requestId === m.requestId) {
+      $('perm').style.display='none'; permRequest=null; permSubmitting=false;
+      stopClock(); setAmbient();
+      const next = pendingPermissions.values().next().value;
+      if (next) showPerm(next);
+    }
+    return;
+  }
+  if (m.type === 'error') {
+    if (m.requestId && permRequest && permRequest.requestId === m.requestId){
+      permSubmitting=false;
+      document.querySelectorAll('#permOpts button').forEach(b=>b.disabled=false);
+    }
+    return toast(m.message);
+  }
   if (m.method === 'bridge/status') {
     $('status').textContent = m.params.state;
     if (m.params.cwd && !cwd) cwd = m.params.cwd;
@@ -382,13 +425,16 @@ function onUpdate(p){
 }
 
 function onAgentRequest(m){
-  if (m.method === 'session/request_permission') return showPerm(m);
-  ws.send(JSON.stringify({type:'agent_response', requestId:m.requestId,
-    error:{code:-32601, message:'unsupported by baton'}}));
+  if (m.method !== 'session/request_permission') return;
+  if (pendingPermissions.has(m.requestId)) return;
+  pendingPermissions.set(m.requestId, m);
+  if (!permRequest) showPerm(m);
 }
 
 function showPerm(m){
   permRequest = m;
+  permSubmitting = false;
+  faceSamples = [];
   const tc = m.params.toolCall || {};
   $('permBody').textContent = `${tc.title||'tool call'}\n${tc.rawInput?JSON.stringify(tc.rawInput).slice(0,500):''}`;
   const box = $('permOpts'); box.innerHTML='';
@@ -411,16 +457,16 @@ function showPerm(m){
   tick('⚠ approval requested: ' + (tc.title||'tool call'));
   if (navigator.vibrate) navigator.vibrate([200,100,200]);
   if (narrationOn) narrate(`Approval requested. ${tc.title||'Tool call'}`);
-  annotate(tc);
+  annotate(tc, m.requestId);
 }
 
 // Mistral one-line risk annotation for the card
-async function annotate(tc){
+async function annotate(tc, rid){
   try {
     const r = await fetch('/api/summarize?token='+token, {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({toolCall:tc})});
     const j = await r.json();
-    if (j.summary && permRequest){
+    if (j.summary && permRequest && permRequest.requestId===rid){
       const e = $('permRisk');
       e.textContent = `mistral · ${j.risk||'medium'} risk — ${j.summary}`;
       e.className = 'risk ' + (j.risk||'medium');
@@ -429,23 +475,16 @@ async function annotate(tc){
   } catch(e){}
 }
 
-// how was it answered — the modality is part of the story
-const VIA = {tap:'👆', swipe:'→', voice:'🎙', face:'🙆'};
-function answerPerm(optionId, via='tap'){
-  if (!permRequest) return;
+function answerPerm(optionId){
+  if (!permRequest || permSubmitting || !ws || ws.readyState !== 1) return;
   const result = optionId
     ? {outcome:{outcome:'selected', optionId}}
     : {outcome:{outcome:'cancelled'}};
   ws.send(JSON.stringify({type:'agent_response', requestId:permRequest.requestId, result}));
-  const s = stopClock();
-  $('perm').style.display='none';
-  permRequest = null;
-  setAmbient();
-  const tag = VIA[via] || '👆';
-  tick(optionId ? `✓ approved in ${s.toFixed(1)}s via ${via} — agent continues`
-                : `✕ rejected in ${s.toFixed(1)}s via ${via}`);
-  stamp(`${tag} ${optionId ? 'approved' : 'rejected'} · ${s.toFixed(1)}s`, !!optionId);
-  if (narrationOn) narrate(optionId ? 'Approved. Agent continues.' : 'Rejected.');
+  permSubmitting = true;
+  document.querySelectorAll('#permOpts button').forEach(b=>b.disabled=true);
+  tick('answer sent — waiting for baton');
+  toast('Answer sent — waiting for Baton');
 }
 
 async function narrate(text){
@@ -501,21 +540,23 @@ async function loadSession(id){
 
 async function send(){
   const v = $('in').value.trim(); if (!v) return;
+  if (turnActive) return toast('A turn is already active');
   $('in').value='';
   if (!sessionId) await newSession();
   if (!sessionId) return;
   el('msg user', v);
   try {
     $('stop').style.display='';
-    turnActive = true; setAmbient();
-    await rpc('session/prompt', {sessionId, prompt:[{type:'text', text:v}]});
+    turnActive = true; turnSessionId = sessionId; setAmbient();
+    await rpc('session/prompt', {sessionId: turnSessionId, prompt:[{type:'text', text:v}]});
     if (narrationOn && lastAgentText) narrate(lastAgentText);
   } catch(e){ toast('prompt: '+e.message); }
-  finally { $('stop').style.display='none'; turnActive=false; curAgentEl=null; setAmbient(); }
+  finally { $('stop').style.display='none'; turnActive=false; turnSessionId=null; curAgentEl=null; setAmbient(); }
 }
 
 async function micToggle(forPerm){
   const btn = forPerm ? $('permMic') : $('mic');
+  const boundRid = forPerm && permRequest ? permRequest.requestId : null;
   if (mediaRec) { mediaRec.stop(); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({audio:true});
@@ -534,7 +575,9 @@ async function micToggle(forPerm){
         if (j.error) return toast(j.error);
         const text = (j.text||'').trim();
         toast('🎙 ' + text, 4000);
-        if (permRequest) voiceAnswer(text); else $('in').value = text;
+        if (!forPerm) $('in').value = text;
+        else if (boundRid && permRequest?.requestId===boundRid) voiceAnswer(text);
+        else toast('That permission card is no longer active');
       } finally { btn.disabled=false; }
     };
     mediaRec.start(); btn.classList.add('rec');
@@ -542,17 +585,17 @@ async function micToggle(forPerm){
   } catch(e){ toast('mic unavailable — needs HTTPS (use ./tunnel.sh)'); }
 }
 
+const YES_PHRASES = new Set(['yes','yeah','approve','allow once','ok','okay','go ahead','sure','confirm']);
+const NO_PHRASES = new Set(['no','nope','reject','deny','cancel','stop',"don't",'dont']);
 function voiceAnswer(text){
-  const t = text.toLowerCase();
-  const opts = permRequest.params.options||[];
-  const yes = /(yes|yeah|approve|allow|ok|go ahead|sure|confirm)/.test(t);
-  const no  = /(no|nope|reject|deny|cancel|stop|don't)/.test(t);
-  if (yes && !no){
+  const t = text.trim().toLowerCase().replace(/[.!?]+$/,'');
+  if (YES_PHRASES.has(t)){
     // speech may only grant once — persistent grants need a deliberate tap
-    const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
-    if (allow) return answerPerm(allow.optionId, 'voice');
+    const allow = (permRequest.params.options||[]).find(o=>o.kind==='allow_once');
+    if (allow) return answerPerm(allow.optionId);
+    return toast('unclear — tap a button');
   }
-  if (no) return answerPerm(null, 'voice');
+  if (NO_PHRASES.has(t)) return answerPerm(null);
   toast('unclear — tap a button');
 }
 
@@ -562,7 +605,10 @@ $('newBtn').onclick = newSession;
 $('sessBtn').onclick = listSessions;
 $('mic').onclick = ()=>micToggle(false);
 $('permMic').onclick = ()=>micToggle(true);
-$('stop').onclick = ()=>{ if(sessionId) notify('session/cancel', {sessionId}); };
+$('stop').onclick = ()=>{
+  const sid = turnSessionId || sessionId;
+  if (sid) notify('session/cancel', {sessionId: sid});
+};
 $('modeSel').onchange = e=>{
   if (sessionId) notify('session/set_mode', {sessionId, modeId:e.target.value});
 };
@@ -574,8 +620,10 @@ $('narrBtn').onclick = ()=>{
 };
 // swipe-to-approve: right = approve once, left = reject (tinder for tool calls)
 (()=>{
-  const el = $('permInner'); let x0=null;
-  el.addEventListener('touchstart', e=>{ x0=e.touches[0].clientX; }, {passive:true});
+  const el = $('permInner'); let x0=null, swipeRid=null;
+  el.addEventListener('touchstart', e=>{
+    x0=e.touches[0].clientX; swipeRid=permRequest?.requestId;
+  }, {passive:true});
   el.addEventListener('touchmove', e=>{
     if (x0==null) return;
     const dx = e.touches[0].clientX-x0;
@@ -583,14 +631,19 @@ $('narrBtn').onclick = ()=>{
     $('perm').style.borderColor = dx>40 ? 'var(--ok)' : dx<-40 ? 'var(--bad)' : '';
   }, {passive:true});
   el.addEventListener('touchend', e=>{
-    const dx = e.changedTouches[0].clientX - x0; x0=null;
+    const rid = swipeRid;
+    const dx = x0===null ? 0 : e.changedTouches[0].clientX-x0;
+    x0=null; swipeRid=null;
     $('perm').style.transform=''; $('perm').style.borderColor='';
-    if (!permRequest) return;
+    if (!rid || !permRequest || permRequest.requestId!==rid) return;
     if (dx > 90){
-      const opts = permRequest.params.options||[];
-      const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
-      if (allow) answerPerm(allow.optionId, 'swipe');
-    } else if (dx < -90) answerPerm(null, 'swipe');
+      const allow = (permRequest.params.options||[]).find(o=>o.kind==='allow_once');
+      if (allow) answerPerm(allow.optionId);
+    } else if (dx < -90) answerPerm(null);
+  });
+  el.addEventListener('touchcancel', ()=>{
+    x0=null; swipeRid=null;
+    $('perm').style.transform=''; $('perm').style.borderColor='';
   });
 })();
 
@@ -666,11 +719,10 @@ function faceAct(yes){
   lastFaceAct = performance.now(); faceSamples=[];
   if (!permRequest) return;
   if (yes){
-    const opts = permRequest.params.options||[];
-    const allow = opts.find(o=>o.kind==='allow_once') || opts.find(o=>o.kind && o.kind.startsWith('allow') && o.kind!=='allow_always') || opts[0];
+    const allow = (permRequest.params.options||[]).find(o=>o.kind==='allow_once');
     toast('nod → approve once');
-    if (allow) answerPerm(allow.optionId, 'face');
-  } else { toast('shake → reject'); answerPerm(null, 'face'); }
+    if (allow) answerPerm(allow.optionId);
+  } else { toast('shake → reject'); answerPerm(null); }
 }
 
 $('pairBtn').onclick = ()=>{
