@@ -122,3 +122,42 @@ voice-native via Mistral's own Voxtral rather than a bolted-on assistant.
 
 Start a refactor at your desk → walk away → permission prompt vibrates on
 your phone → say "yes, go ahead" → Voxtral transcribes → agent keeps working.
+
+## FAQ
+
+**How does it get to my phone? Does Vibe need to run there?**
+Nothing installs on the phone — it is just a browser. `run.sh` prints a URL
+(and `/qr.png` on the host); open it and you're paired. Vibe keeps running on
+the laptop the whole time: baton speaks stdio/JSON-RPC to `vibe-acp` locally
+and plain WebSocket+JSON outward, so the session, the sandbox, and the files
+never leave the machine — only the *authority* moves. Off-LAN, `./tunnel.sh`
+(cloudflared) gives an `https://` URL, which voice/face need anyway since
+browsers block `getUserMedia` on plain `http://` LAN origins.
+
+**Could it work over Telegram / Slack / a watch?**
+The bridge is just a WebSocket protocol — any client can subscribe to
+permission requests and post answers; first answer wins and the other cards
+dismiss. A Telegram bot with inline buttons is ~100 lines of adapter. The
+browser is the richest client, not the only possible one.
+
+**Where are the extra features? How do I turn them on?**
+- 🙆 **Face** — a "nod or shake your answer" button on every permission card.
+  MediaPipe runs on-device in the phone browser; no frames leave the phone.
+  Nod = approve once, shake = reject. Needs HTTPS (camera).
+- 🎙 **Voice** — "speak your answer" → Voxtral transcribes → parsed to
+  allow/deny. Voice and face can only approve *once*, never "always allow" —
+  a deliberate safety bound.
+- 🛡 **Trust dial** — the header toggle sets `auto_low` via
+  `POST /api/policy`: Mistral-classified low-risk calls auto-pass, one-way
+  doors (`rm -rf`, force-push, drops) always escalate, and deny rules
+  (`.env`, `id_rsa`, secrets) are refused before they ever reach a client.
+  Rule lists are settable through the same endpoint.
+
+**What was there before vs. what baton adds?**
+Vibe's `ask` mode holds the whole turn hostage until someone walks back to
+the keyboard — approval latency is bounded by *your* commute to the desk;
+the escape hatches are babysitting the terminal or blanket auto-approve.
+Baton turns "wait until you're back" into "answered in ~10 seconds from
+anywhere" — and policy turns blanket auto-approve into deny-lists, scoped
+allow rules, and one-way-door escalation. Same `session/request_permission`
+primitive; the session itself is untouched.
